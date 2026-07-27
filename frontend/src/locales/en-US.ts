@@ -1,7 +1,7 @@
 export default {
   brand: {
-    name: 'TransitHub',
-    logoAlt: 'TransitHub logo'
+    name: 'zrowatch',
+    logoAlt: 'zrowatch logo'
   },
   nav: {
     features: 'Features',
@@ -48,7 +48,7 @@ export default {
     salesBtn: 'Contact Sales'
   },
   footer: {
-    rights: 'TransitHub Operations. All rights reserved.'
+    rights: 'zrowatch Operations. All rights reserved.'
   },
   auth: {
     backToHome: 'Back to Home',
@@ -915,7 +915,14 @@ export default {
           strategy: 'Effective Policy',
           priority: 'Upstream Priority',
           multiplier: 'Effective Multiplier',
+          scheduling: 'Scheduling',
           actions: 'Actions'
+        },
+        scheduling: {
+          enable: 'Enable scheduling',
+          disable: 'Disable scheduling',
+          enabled: 'Scheduling on',
+          disabled: 'Scheduling off'
         },
         models: {
           empty: 'This target has no model probe results yet.',
@@ -1283,6 +1290,7 @@ export default {
       },
       errors: {
         request: 'Operation failed. Please try again.',
+        balanceSuspended: 'The account\'s upstream site has insufficient balance, so scheduling cannot be enabled yet.',
         unknown: 'Group health data is temporarily unavailable. Please try again.',
         network: 'Network error. Check your connection and try again.',
         notFound: 'Probe target not found or inaccessible.',
@@ -1303,6 +1311,12 @@ export default {
     },
       upstream: {
         searchPlaceholder: 'Search site name...',
+        filters: {
+          allPlatforms: 'All Platforms',
+          platform: 'Platform filter',
+          allConnectedGroupTypes: 'All Connected Types',
+          connectedGroupType: 'Connected type filter'
+        },
         addSite: 'Add Site',
         summary: '{connected} / {total} upstream sites connected',
         refresh: {
@@ -1378,6 +1392,7 @@ export default {
         groupMultiplier: 'Group Multiplier',
         availableGroups: 'Available Groups',
         viewAvailableGroups: 'View Available Groups',
+        connectedGroups: 'Connected Groups',
         closeGroupsModal: 'Close',
         dedicatedMultiplierBadge: 'Dedicated Rate',
         dedicatedMultiplierTooltip: 'This user has a sub2api dedicated rate override. Business calculations use the rate on the right.',
@@ -1385,6 +1400,9 @@ export default {
         isConnected: 'Integration',
         connected: 'Connected',
         disconnected: 'Disconnected',
+        checkingConnections: 'Checking integration status',
+        connectedGroupsPreview: 'Connected groups: {groups}',
+        noConnectedGroups: 'No connected groups',
         lastUpdated: 'Last Updated',
         notSynced: 'Not synced yet'
       },
@@ -1392,6 +1410,7 @@ export default {
         connecting: 'Connecting',
         syncing: 'Syncing',
         connected: 'Connected',
+        disabled: 'Closed',
         error: 'Error'
       },
       empty: {
@@ -1467,14 +1486,103 @@ export default {
       fields: {
         siteName: 'Site Name',
         groupName: 'Group Name',
+        upstreamGroup: 'Upstream Group',
+        downstreamGroup: 'Downstream Group',
         type: 'Group Type',
         platform: 'Site Platform',
         currentMultiplier: 'Current Multiplier',
         effectiveMultiplier: 'Converted Cost Multiplier',
         multiplierFormula: 'Upstream {upstream} × recharge factor {recharge}',
         delta: 'Rise/Fall',
+        health: 'Health',
         updatedAt: 'Updated Time',
+        dispatch: 'Dispatch',
         actions: 'Actions'
+      },
+      dispatch: {
+        enableForRate: 'Enable dispatch for {site} · {group}',
+        disableForRate: 'Stop dispatch for {site} · {group}',
+        loading: 'Loading dispatch state…',
+        updating: 'Updating dispatch state…',
+        accountMissing: 'The remote account no longer exists. Reconnect it before changing dispatch.',
+        unavailable: 'Dispatch state is unavailable. Refresh and try again.',
+        loadFailed: 'Failed to load dispatch state. Refresh and try again.',
+        updateFailed: 'Failed to update dispatch. Please try again.'
+      },
+      health: {
+        noResult: 'No probe result',
+        status: {
+          healthy: 'Healthy',
+          warning: 'Unstable',
+          unhealthy: 'Failed',
+          unavailable: 'Unavailable',
+          unconfigured: 'Not set',
+          stale: 'Stale'
+        },
+        trigger: {
+          manual: 'Manual probe',
+          scheduled: 'Automatic probe'
+        },
+        tooltip: {
+          model: 'Model: {model}',
+          upstreamGroup: 'Upstream group: {group}'
+        },
+        result: {
+          success: 'Success',
+          failed: 'Failed',
+          network_fluctuation: 'Network error',
+          rate_limited: 'Rate limited',
+          server_error: 'Upstream server error',
+          auth: 'Authentication failed',
+          model_not_found: 'Model not found',
+          invalid_response: 'Invalid response',
+          unsupported: 'Unsupported'
+        },
+        unavailable: {
+          unknown: 'Probe unavailable',
+          not_found: 'Remote account missing',
+          target_busy: 'Target is busy',
+          state_unavailable: 'State storage failed',
+          credential_unavailable: 'Probe credentials unavailable',
+          secure_verification_required: 'Upstream verification required',
+          base_url_unavailable: 'Base URL unavailable',
+          model_unavailable: 'Model unavailable',
+          export_unavailable: 'Account export unavailable',
+          credentials_redacted: 'Account credentials are redacted'
+        },
+        probe: {
+          action: 'Probe now',
+          disabled: 'Configure a probe model first',
+          success: 'Probe succeeded',
+          warning: 'Probe failed; the dispatch shutdown threshold has not been reached',
+          failedAndDisabled: 'Probe failed and the related account dispatch was stopped',
+          failedAction: 'Probe failed, but the related account dispatch could not be stopped',
+          failedWithoutControl: 'Probe failed; automatic probing is disabled, so dispatch was unchanged',
+          unavailable: 'Probe unavailable. Check the site URL, API key, and model',
+          requestFailed: 'Probe request failed. Try again later'
+        },
+        settings: {
+          action: 'Probe Settings',
+          title: 'Probe Settings',
+          description: 'Probe each upstream group with its site URL and API key, then stop its bound downstream Sub2API accounts after consecutive failures.',
+          loading: 'Loading probe settings...',
+          enabled: 'Enable automatic probing',
+          enabledHint: 'Current and future connected upstream groups are probed automatically with their own site URL and API key.',
+          interval: 'Probe interval (seconds)',
+          failureThreshold: 'Consecutive failure threshold',
+          defaultModel: 'Default model',
+          modelPlaceholder: 'For example, gpt-4o-mini',
+          save: 'Save Settings',
+          saved: 'Settings saved. Restored {restored}, pending {pending}, manual conflicts {conflict}.'
+        },
+        errors: {
+          modelRequired: 'A default model is required before automatic probing can be enabled.',
+          disabled: 'No probe model is configured. Configure probe settings first.',
+          loadFailed: 'Failed to load health status. Please try again.',
+          settingsLoadFailed: 'Failed to load probe settings. Please try again.',
+          settingsSaveFailed: 'Failed to save probe settings. Please try again.',
+          probeFailed: 'Manual probe failed. Please try again.'
+        }
       },
       actions: {
         refresh: 'Refresh Data',
@@ -1488,6 +1596,7 @@ export default {
         closeConnect: 'Close connect dialog',
         saveConnect: 'Connect',
         cancel: 'Cancel',
+        confirm: 'Confirm',
         saveType: 'Save Type'
       },
       filters: {
@@ -1600,11 +1709,24 @@ export default {
         unlinkOnlyHint: 'Only remove the local binding record, keep the upstream Key and Admin account',
         deleteAll: 'Delete Account & Key',
         deleteAllHint: 'Also delete the upstream Key and the Admin site forwarding account',
+        downstreamGroups: 'Select downstream groups',
+        downstreamGroupsHint: 'Only selected downstream groups will be processed; other bindings stay intact',
+        selectTarget: 'Select at least one downstream group',
+        noTargets: 'No downstream groups were found',
         removePricingMapping: 'Also remove the pricing source',
         removePricingMappingHint: 'Turn this off to keep the upstream group in pricing mappings.',
         confirm: 'Confirm',
         disconnecting: 'Disconnecting...',
         failed: 'Failed to disconnect'
+      },
+      connectionEdit: {
+        action: 'Edit downstream groups',
+        title: 'Edit downstream groups for {site} · {group}',
+        description: 'Select which groups on your site can use this upstream group.',
+        ownGroupLabel: 'My site groups',
+        empty: 'No site groups are available',
+        loadFailed: 'Failed to load site groups. Refresh and try again.',
+        failed: 'Failed to update downstream groups'
       },
       format: {
         multiplier: '{value}x',
@@ -1751,9 +1873,12 @@ export default {
     },
     mySites: {
       errors: {
+        request: 'The request does not match the current binding data. Refresh the page and try again.',
+        unknown: 'Failed to disconnect. Try again later.',
         invalidAutoPricingConfig: 'Invalid auto-pricing config: primary upstream not in linked upstreams, or min multiplier exceeds max.',
         connectionExists: 'A real connection already exists for this upstream group.',
-        managedDeleteOnly: 'Existing-resource links can only be unlinked locally; remote resources cannot be deleted.'
+        managedDeleteOnly: 'Existing-resource links can only be unlinked locally; remote resources cannot be deleted.',
+        partialDisconnectUnsupported: 'This downstream platform cannot delete only part of an account. Select all downstream groups for this account.'
       }
     },
     tickets: {

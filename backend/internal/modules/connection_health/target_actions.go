@@ -11,6 +11,7 @@ import (
 const (
 	RemoteActionSkippedTargetConflict          = "skipped_target_conflict"
 	RemoteActionSkippedTargetInitiallyDisabled = "skipped_target_initially_disabled"
+	RemoteActionSkippedBalanceSuspended        = "skipped_balance_suspended"
 )
 
 // reconcileTargetRemoteAction 把同一账号当前仍启用的全部模型状态聚合成一次上游动作。
@@ -23,6 +24,15 @@ func (s *Service) reconcileTargetRemoteAction(
 	target AdminProbeTarget,
 	specs []probeModelSpec,
 ) (string, error) {
+	if target.Platform == string(upstream.PlatformSub2API) && s.balancePauses != nil && target.AccountID != "" {
+		paused, err := s.balancePauses.IsAccountBalancePausedForWorkspace(ctx, userID, adminAccountID, target.AccountID)
+		if err != nil {
+			return RemoteActionSkippedBalanceSuspended, err
+		}
+		if paused {
+			return RemoteActionSkippedBalanceSuspended, nil
+		}
+	}
 	controlledModels := make(map[string]struct{})
 	for _, spec := range specs {
 		if spec.policy.Enabled && policyRemoteActionEnabled(spec.policy) {
@@ -151,6 +161,16 @@ func (s *Service) restoreUnmanagedTargetActions(
 	groupPolicies := assignedEnabledPoliciesByGroup(policies, groupAssignments)
 	excluded := groupTargetExclusionIndex(exclusions)
 	for _, stored := range states {
+		if parsed, ok := parseTargetID(stored.TargetID); ok && parsed.platform == string(upstream.PlatformSub2API) && s.balancePauses != nil {
+			paused, err := s.balancePauses.IsAccountBalancePausedForWorkspace(ctx, stored.UserID, stored.AdminAccountID, parsed.accountID)
+			if err != nil {
+				log.Printf("[connection-health] balance pause lookup failed target_id=%s err=%v", stored.TargetID, err)
+				continue
+			}
+			if paused {
+				continue
+			}
+		}
 		inventory, err := s.loadAdminInventory(ctx, stored.UserID, stored.AdminAccountID, inventoryCache)
 		if err != nil {
 			log.Printf("[connection-health] restore unmanaged target inventory failed target_id=%s err=%v", stored.TargetID, err)

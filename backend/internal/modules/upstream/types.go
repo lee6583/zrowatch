@@ -20,6 +20,7 @@ const (
 	StatusConnecting Status = "connecting"
 	StatusSyncing    Status = "syncing"
 	StatusConnected  Status = "connected"
+	StatusDisabled   Status = "disabled"
 	StatusError      Status = "error"
 )
 
@@ -145,40 +146,46 @@ type SiteSettings struct {
 }
 
 type Site struct {
-	ID                string       `json:"id"`
-	UserID            string       `json:"-"`
-	AdminAccountID    string       `json:"-"`
-	Name              string       `json:"name"`
-	BaseURL           string       `json:"baseUrl"`
-	Platform          Platform     `json:"platform"`
-	RequestedPlatform Platform     `json:"requestedPlatform"`
-	Account           string       `json:"account"`
-	Remark            string       `json:"remark"`
-	RechargeRate      float64      `json:"rechargeRate"`
-	Status            Status       `json:"status"`
-	ErrorKey          *string      `json:"errorKey"`
-	Metrics           Metrics      `json:"metrics"`
-	Settings          SiteSettings `json:"settings"`
-	LastSyncedAt      *int64       `json:"lastSyncedAt"`
-	Session           *Session     `json:"-"`
+	ID                 string       `json:"id"`
+	UserID             string       `json:"-"`
+	AdminAccountID     string       `json:"-"`
+	Name               string       `json:"name"`
+	BaseURL            string       `json:"baseUrl"`
+	Platform           Platform     `json:"platform"`
+	RequestedPlatform  Platform     `json:"requestedPlatform"`
+	Account            string       `json:"account"`
+	Remark             string       `json:"remark"`
+	RechargeRate       float64      `json:"rechargeRate"`
+	Status             Status       `json:"status"`
+	BalanceSuspended   bool         `json:"balanceSuspended"`
+	BalanceSuspendedAt *int64       `json:"balanceSuspendedAt,omitempty"`
+	BalancePauseReason string       `json:"balancePauseReason,omitempty"`
+	ErrorKey           *string      `json:"errorKey"`
+	Metrics            Metrics      `json:"metrics"`
+	Settings           SiteSettings `json:"settings"`
+	LastSyncedAt       *int64       `json:"lastSyncedAt"`
+	Session            *Session     `json:"-"`
 }
 
 type Response struct {
-	ID                string       `json:"id"`
-	UserID            string       `json:"-"`
-	AdminAccountID    string       `json:"-"`
-	Name              string       `json:"name"`
-	BaseURL           string       `json:"baseUrl"`
-	Platform          Platform     `json:"platform"`
-	RequestedPlatform Platform     `json:"requestedPlatform"`
-	Account           string       `json:"account"`
-	Remark            string       `json:"remark"`
-	RechargeRate      float64      `json:"rechargeRate"`
-	Status            Status       `json:"status"`
-	ErrorKey          *string      `json:"errorKey"`
-	Metrics           Metrics      `json:"metrics"`
-	Settings          SiteSettings `json:"settings"`
-	LastSyncedAt      *int64       `json:"lastSyncedAt"`
+	ID                 string       `json:"id"`
+	UserID             string       `json:"-"`
+	AdminAccountID     string       `json:"-"`
+	Name               string       `json:"name"`
+	BaseURL            string       `json:"baseUrl"`
+	Platform           Platform     `json:"platform"`
+	RequestedPlatform  Platform     `json:"requestedPlatform"`
+	Account            string       `json:"account"`
+	Remark             string       `json:"remark"`
+	RechargeRate       float64      `json:"rechargeRate"`
+	Status             Status       `json:"status"`
+	BalanceSuspended   bool         `json:"balanceSuspended"`
+	BalanceSuspendedAt *int64       `json:"balanceSuspendedAt,omitempty"`
+	BalancePauseReason string       `json:"balancePauseReason,omitempty"`
+	ErrorKey           *string      `json:"errorKey"`
+	Metrics            Metrics      `json:"metrics"`
+	Settings           SiteSettings `json:"settings"`
+	LastSyncedAt       *int64       `json:"lastSyncedAt"`
 }
 
 type Session struct {

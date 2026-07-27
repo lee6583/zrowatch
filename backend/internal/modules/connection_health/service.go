@@ -2,11 +2,14 @@ package connection_health
 
 import (
 	"context"
+	"errors"
 	"log"
 	"strings"
+	"sync"
 	"time"
 
 	"transithub/backend/internal/modules/my_sites"
+	"transithub/backend/internal/modules/upstream"
 )
 
 // healthRepository 是 Service 对存储层的全部依赖，由 *Repository 结构性满足。
@@ -54,15 +57,19 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo            healthRepository
-	mySites         MySitesReader
-	sites           SiteLookup
-	accounts        AdminAccountResolver
-	dispatcher      RemoteActionRunner
-	probeRunner     *RealProbeRunner
-	modelDiscovery  *ModelDiscoveryRunner
-	platformGroups  PlatformGroupReader
-	priorityActions TargetPriorityActioner
+	repo              healthRepository
+	mySites           MySitesReader
+	sites             SiteLookup
+	accounts          AdminAccountResolver
+	dispatcher        RemoteActionRunner
+	probeRunner       *RealProbeRunner
+	modelDiscovery    *ModelDiscoveryRunner
+	platformGroups    PlatformGroupReader
+	priorityActions   TargetPriorityActioner
+	schedulingActions AccountSchedulingActioner
+	dispatchActions   AccountDispatchActioner
+	dispatchStates    AccountDispatchStateReader
+	balancePauses     BalancePauseLookup
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
@@ -79,7 +86,261 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 	if actions, ok := platform.(TargetPriorityActioner); ok {
 		service.priorityActions = actions
 	}
+	if actions, ok := platform.(AccountSchedulingActioner); ok {
+		service.schedulingActions = actions
+	}
+	if actions, ok := platform.(AccountDispatchActioner); ok {
+		service.dispatchActions = actions
+	}
+	if reader, ok := platform.(AccountDispatchStateReader); ok {
+		service.dispatchStates = reader
+	}
 	return service
+}
+
+// AccountSchedulingActioner updates the Sub2API account scheduling switch while
+// keeping the rest of the remote account configuration intact.
+type AccountSchedulingActioner interface {
+	UpdateSub2APIAdminAccountState(session upstream.Session, accountID string, status *string, schedulable *bool) error
+}
+
+// AccountDispatchActioner is the fast path for the group-rates dispatch switch.
+// It validates the account by ID and performs the GET+PUT merge without
+// enumerating all upstream groups and account lists first.
+type AccountDispatchActioner interface {
+	UpdateSub2APIAdminAccountDispatch(session upstream.Session, accountID string, enabled bool) (upstream.Sub2APIAdminAccountState, error)
+}
+
+// AccountDispatchStateReader reads one bound account directly by its stable ID.
+// This avoids the expensive admin-group inventory scan for the group-rates page.
+type AccountDispatchStateReader interface {
+	GetSub2APIAdminAccountState(session upstream.Session, accountID string) (upstream.Sub2APIAdminAccountState, error)
+}
+
+// BoundDispatchAccountState is the small, non-sensitive state needed by the
+// group-rates dispatch switch. Unavailable accounts remain in the response so
+// the UI can distinguish a failed lookup from a request still in progress.
+type BoundDispatchAccountState struct {
+	ID                string `json:"id"`
+	Name              string `json:"name"`
+	Status            string `json:"status"`
+	Schedulable       *bool  `json:"schedulable,omitempty"`
+	TargetID          string `json:"targetId"`
+	Available         bool   `json:"available"`
+	UnavailableReason string `json:"unavailableReason,omitempty"`
+	ActionResult      string `json:"actionResult,omitempty"`
+}
+
+// BoundDispatchAccounts reads only Sub2API accounts referenced by active
+// real_connections in the current workspace. Account detail requests are
+// independent and bounded-concurrent so one missing account does not block the
+// remaining switches.
+func (s *Service) BoundDispatchAccounts(ctx context.Context, userID string) ([]BoundDispatchAccountState, error) {
+	if s.dispatchStates == nil || s.mySites == nil {
+		return nil, requestError(ErrorUnknown)
+	}
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	if session.Platform != upstream.PlatformSub2API {
+		return []BoundDispatchAccountState{}, nil
+	}
+	connections, err := s.mySites.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]BoundDispatchAccountState, 0, len(connections))
+	seen := make(map[string]struct{}, len(connections))
+	for _, connection := range connections {
+		accountID := strings.TrimSpace(connection.AdminAccountID)
+		adminPlatform := strings.ToLower(strings.TrimSpace(connection.AdminPlatform))
+		if accountID == "" || (connection.Status != "" && connection.Status != my_sites.ConnectionStatusActive) ||
+			(adminPlatform != "" && adminPlatform != string(upstream.PlatformSub2API)) {
+			continue
+		}
+		if _, exists := seen[accountID]; exists {
+			continue
+		}
+		seen[accountID] = struct{}{}
+		results = append(results, BoundDispatchAccountState{
+			ID:       accountID,
+			Name:     connection.AdminAccountName,
+			TargetID: buildTargetID(string(upstream.PlatformSub2API), adminAccountID, accountID),
+		})
+	}
+
+	var wait sync.WaitGroup
+	limit := make(chan struct{}, 6)
+	for index := range results {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			state, stateErr := s.dispatchStates.GetSub2APIAdminAccountState(session, results[index].ID)
+			if stateErr != nil {
+				var requestErr *upstream.RequestError
+				if errors.As(stateErr, &requestErr) && requestErr.StatusCode == 404 {
+					results[index].UnavailableReason = "not_found"
+				} else {
+					results[index].UnavailableReason = "unavailable"
+				}
+				return
+			}
+			if strings.TrimSpace(state.Status) == "" || state.Schedulable == nil {
+				results[index].UnavailableReason = "invalid_state"
+				return
+			}
+			if strings.TrimSpace(state.Name) != "" {
+				results[index].Name = state.Name
+			}
+			results[index].Status = state.Status
+			results[index].Schedulable = state.Schedulable
+			results[index].Available = true
+		}(index)
+	}
+	wait.Wait()
+	return results, nil
+}
+
+func (s *Service) SetBalancePauseLookup(lookup BalancePauseLookup) {
+	s.balancePauses = lookup
+	if dispatcher, ok := s.dispatcher.(*remoteActionDispatcher); ok {
+		dispatcher.SetBalancePauseLookup(lookup)
+	}
+}
+
+func (s *Service) UpdateTargetScheduling(ctx context.Context, userID, targetID string, schedulable bool) error {
+	if s.schedulingActions == nil {
+		return requestError(ErrorUnknown)
+	}
+	session, target, _, workspaceID, err := s.resolveManualTarget(ctx, userID, targetID)
+	if err != nil {
+		return err
+	}
+	if target.Platform != string(upstream.PlatformSub2API) {
+		return requestError(ErrorRequest)
+	}
+	if schedulable && s.balancePauses != nil {
+		paused, err := s.balancePauses.IsAccountBalancePausedForWorkspace(ctx, userID, workspaceID, target.AccountID)
+		if err != nil {
+			return err
+		}
+		if paused {
+			return requestError(ErrorBalanceSuspended)
+		}
+	}
+	return s.schedulingActions.UpdateSub2APIAdminAccountState(session, target.AccountID, nil, &schedulable)
+}
+
+// UpdateTargetDispatch changes both Sub2API account switches as one user action.
+// It intentionally remains separate from UpdateTargetScheduling because the
+// group-health page only owns the schedulable flag.
+func (s *Service) UpdateTargetDispatch(ctx context.Context, userID, targetID string, enabled bool) (TargetDispatchState, error) {
+	if (s.schedulingActions == nil && s.dispatchActions == nil) || s.repo == nil {
+		return TargetDispatchState{}, requestError(ErrorUnknown)
+	}
+	if s.dispatchActions != nil {
+		return s.updateTargetDispatchFast(ctx, userID, targetID, enabled)
+	}
+	session, target, account, workspaceID, err := s.resolveManualTarget(ctx, userID, targetID)
+	if err != nil {
+		return TargetDispatchState{}, err
+	}
+	if target.Platform != string(upstream.PlatformSub2API) || account.Schedulable == nil {
+		return TargetDispatchState{}, requestError(ErrorRequest)
+	}
+	if enabled && s.balancePauses != nil {
+		paused, err := s.balancePauses.IsAccountBalancePausedForWorkspace(ctx, userID, workspaceID, target.AccountID)
+		if err != nil {
+			return TargetDispatchState{}, err
+		}
+		if paused {
+			return TargetDispatchState{}, requestError(ErrorBalanceSuspended)
+		}
+	}
+
+	release, err := s.repo.AcquireTargetLease(ctx, targetID)
+	if err != nil {
+		return TargetDispatchState{}, err
+	}
+	defer release()
+
+	status := "inactive"
+	if enabled {
+		status = "active"
+	}
+	if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, target.AccountID, &status, &enabled); err != nil {
+		return TargetDispatchState{}, err
+	}
+	if err := s.clearTargetAutomationTracking(ctx, userID, workspaceID, targetID); err != nil {
+		return TargetDispatchState{}, err
+	}
+	return TargetDispatchState{Status: status, Schedulable: enabled}, nil
+}
+
+func (s *Service) updateTargetDispatchFast(ctx context.Context, userID, targetID string, enabled bool) (TargetDispatchState, error) {
+	session, workspaceID, accountID, err := s.resolveDispatchTarget(ctx, userID, targetID)
+	if err != nil {
+		return TargetDispatchState{}, err
+	}
+	if enabled && s.balancePauses != nil {
+		paused, err := s.balancePauses.IsAccountBalancePausedForWorkspace(ctx, userID, workspaceID, accountID)
+		if err != nil {
+			return TargetDispatchState{}, err
+		}
+		if paused {
+			return TargetDispatchState{}, requestError(ErrorBalanceSuspended)
+		}
+	}
+
+	release, err := s.repo.AcquireTargetLease(ctx, targetID)
+	if err != nil {
+		return TargetDispatchState{}, err
+	}
+	defer release()
+
+	state, err := s.dispatchActions.UpdateSub2APIAdminAccountDispatch(session, accountID, enabled)
+	if err != nil {
+		// The direct detail endpoint deliberately does not expose upstream error
+		// text. Treat a failed account lookup/update as an unavailable target.
+		var upstreamErr *upstream.RequestError
+		if errors.As(err, &upstreamErr) {
+			return TargetDispatchState{}, requestError(ErrorProbeTargetNotFound)
+		}
+		return TargetDispatchState{}, err
+	}
+	if strings.TrimSpace(state.Status) == "" || state.Schedulable == nil {
+		return TargetDispatchState{}, requestError(ErrorRequest)
+	}
+	if err := s.clearTargetAutomationTracking(ctx, userID, workspaceID, targetID); err != nil {
+		return TargetDispatchState{}, err
+	}
+	return TargetDispatchState{Status: state.Status, Schedulable: *state.Schedulable}, nil
+}
+
+func (s *Service) clearTargetAutomationTracking(ctx context.Context, userID, workspaceID, targetID string) error {
+	s.markGroupRateMonitorManualConflict(ctx, userID, workspaceID, targetID)
+	states, err := s.repo.ListStatesByConnection(ctx, targetID)
+	if err != nil {
+		return err
+	}
+	for _, state := range states {
+		if state.UserID != userID || state.AdminAccountID != workspaceID || state.LastRemoteAction == "" {
+			continue
+		}
+		state.LastRemoteAction = ""
+		if err := s.repo.UpsertState(ctx, state); err != nil {
+			return err
+		}
+	}
+	return s.repo.DeleteTargetActionState(ctx, userID, workspaceID, targetID)
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {

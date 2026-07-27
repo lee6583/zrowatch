@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   X,
 } from 'lucide-vue-next'
+import { Select } from '@/components/ui/select'
 import { connectionHealthMessageKey, useConnectionHealth } from '../../composables/useConnectionHealth'
 import type {
   AdminGroupAccount,
@@ -537,9 +538,9 @@ const close = () => {
                   <div class="grid gap-3 sm:grid-cols-2">
                     <label class="space-y-1.5">
                       <span class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.strategy.providerLabel`) }}</span>
-                      <select v-model="providerFamily" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground">
+                      <Select v-model="providerFamily" class="h-9">
                         <option v-for="provider in providerOptions" :key="provider" :value="provider">{{ t(`admin.connectionHealth.providerLabels.${provider}`) }}</option>
-                      </select>
+                      </Select>
                     </label>
                     <label class="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2">
                       <span>

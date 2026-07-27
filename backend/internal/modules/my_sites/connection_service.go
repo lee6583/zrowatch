@@ -536,6 +536,105 @@ func (s *Service) realBindExisting(ctx context.Context, userID string, req RealB
 	return RealConnectResponse{Connection: publicRealConnection(conn)}, nil
 }
 
+func (s *Service) UpdateRealConnectionGroups(ctx context.Context, userID, connectionID string, req UpdateRealConnectionGroupsRequest) (RealConnection, error) {
+	connectionID = strings.TrimSpace(connectionID)
+	if connectionID == "" || len(req.OwnGroupIDs) == 0 || s.connRepository == nil {
+		return RealConnection{}, requestError(ErrorRequest)
+	}
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return RealConnection{}, err
+	}
+	conn, err := s.connRepository.GetRealConnection(ctx, connectionID, userID, adminAccountID)
+	if err != nil {
+		return RealConnection{}, err
+	}
+	if conn == nil || strings.TrimSpace(conn.AdminAccountID) == "" {
+		return RealConnection{}, requestError(ErrorRequest)
+	}
+	state, err := s.authenticatedState(ctx, userID, adminAccountID)
+	if err != nil {
+		return RealConnection{}, err
+	}
+	groupIDs, groupNames, err := s.resolveAdminGroups(ctx, state, req.OwnGroupIDs)
+	if err != nil {
+		return RealConnection{}, err
+	}
+	if string(state.Session.Platform) != conn.AdminPlatform && conn.AdminPlatform != "" {
+		return RealConnection{}, requestError(ErrorRequest)
+	}
+	if sameStringSet(groupIDs, conn.OwnGroupIDs) {
+		conn.OwnGroupIDs = groupIDs
+		conn.OwnGroupNames = groupNames
+		return publicRealConnection(*conn), nil
+	}
+
+	switch state.Session.Platform {
+	case upstream.PlatformSub2API:
+		if err := s.platformService.UpdateSub2APIAdminAccountGroupIDs(state.Session, conn.AdminAccountID, groupIDs); err != nil {
+			return RealConnection{}, err
+		}
+	case upstream.PlatformNewAPI:
+		if err := s.platformService.UpdateNewAPIChannelGroupIDs(state.Session, conn.AdminAccountID, groupIDs); err != nil {
+			return RealConnection{}, err
+		}
+	default:
+		return RealConnection{}, requestError(ErrorRequest)
+	}
+
+	oldNamesByID := make(map[string]string, len(conn.OwnGroupIDs))
+	for index, id := range conn.OwnGroupIDs {
+		name := id
+		if index < len(conn.OwnGroupNames) && strings.TrimSpace(conn.OwnGroupNames[index]) != "" {
+			name = conn.OwnGroupNames[index]
+		}
+		oldNamesByID[id] = name
+	}
+	newNamesByID := make(map[string]string, len(groupIDs))
+	for index, id := range groupIDs {
+		newNamesByID[id] = groupNames[index]
+	}
+	addedNames := make([]string, 0)
+	for id, name := range newNamesByID {
+		if _, existed := oldNamesByID[id]; !existed {
+			addedNames = append(addedNames, name)
+		}
+	}
+	removedNames := make([]string, 0)
+	for id, name := range oldNamesByID {
+		if _, retained := newNamesByID[id]; !retained {
+			removedNames = append(removedNames, name)
+		}
+	}
+
+	repository, ok := s.connRepository.(RealConnectionGroupUpdater)
+	if !ok {
+		return RealConnection{}, requestError(ErrorRequest)
+	}
+	if err := repository.UpdateRealConnectionGroups(ctx, *conn, groupIDs, groupNames, addedNames, removedNames); err != nil {
+		return RealConnection{}, err
+	}
+	conn.OwnGroupIDs = groupIDs
+	conn.OwnGroupNames = groupNames
+	return publicRealConnection(*conn), nil
+}
+
+func sameStringSet(first, second []string) bool {
+	if len(first) != len(second) {
+		return false
+	}
+	values := make(map[string]struct{}, len(first))
+	for _, value := range first {
+		values[value] = struct{}{}
+	}
+	for _, value := range second {
+		if _, ok := values[value]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *Service) realDisconnectConnection(ctx context.Context, userID string, req RealDisconnectRequest) error {
 	if strings.TrimSpace(req.ConnectionID) == "" || (req.Mode != "unlink" && req.Mode != "full") || s.connRepository == nil {
 		return requestError(ErrorRequest)
@@ -550,6 +649,37 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 	}
 	if conn == nil {
 		return requestError(ErrorRequest)
+	}
+
+	selectedIDs := normalizeDisconnectGroupIDs(req.OwnGroupIDs, conn.OwnGroupIDs)
+	if len(req.OwnGroupIDs) > 0 && len(selectedIDs) == 0 {
+		return requestError(ErrorRequest)
+	}
+	if len(selectedIDs) == 0 {
+		selectedIDs = append([]string(nil), conn.OwnGroupIDs...)
+	}
+	selectedSet := make(map[string]struct{}, len(selectedIDs))
+	for _, id := range selectedIDs {
+		selectedSet[id] = struct{}{}
+	}
+	remainingIDs := make([]string, 0, len(conn.OwnGroupIDs))
+	remainingNames := make([]string, 0, len(conn.OwnGroupNames))
+	removedNames := make([]string, 0, len(selectedIDs))
+	for index, id := range conn.OwnGroupIDs {
+		name := id
+		if index < len(conn.OwnGroupNames) && strings.TrimSpace(conn.OwnGroupNames[index]) != "" {
+			name = conn.OwnGroupNames[index]
+		}
+		if _, selected := selectedSet[id]; selected {
+			removedNames = append(removedNames, name)
+			continue
+		}
+		remainingIDs = append(remainingIDs, id)
+		remainingNames = append(remainingNames, name)
+	}
+	partial := len(remainingIDs) > 0 && len(removedNames) > 0
+	if partial && req.Mode == "full" && !strings.EqualFold(conn.AdminPlatform, string(upstream.PlatformSub2API)) {
+		return requestError(ErrorPartialDisconnectUnsupported)
 	}
 
 	if req.Mode == "full" {
@@ -573,17 +703,30 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 		if conn.UpstreamPlatform != "" && conn.UpstreamPlatform != string(upstreamSession.Platform) {
 			return requestError(ErrorRequest)
 		}
-		if err := s.deleteAdminResource(adminSession, conn.AdminAccountID); err != nil {
-			return err
-		}
-		if err := s.deleteUpstreamCredential(upstreamSession, conn.UpstreamKeyID); err != nil {
-			return err
+		if partial {
+			if err := s.platformService.UpdateSub2APIAdminAccountGroupIDs(adminSession, conn.AdminAccountID, remainingIDs); err != nil {
+				return err
+			}
+		} else {
+			if err := s.deleteAdminResource(adminSession, conn.AdminAccountID); err != nil {
+				return err
+			}
+			if err := s.deleteUpstreamCredential(upstreamSession, conn.UpstreamKeyID); err != nil {
+				return err
+			}
 		}
 	}
 
 	removePricing := conn.PricingMappingEnabled
 	if req.RemovePricingMapping != nil {
 		removePricing = *req.RemovePricingMapping
+	}
+	if partial {
+		repository, ok := s.connRepository.(PartialRealDisconnectRepository)
+		if !ok {
+			return requestError(ErrorRequest)
+		}
+		return repository.PartialDisconnectRealConnection(ctx, *conn, remainingIDs, remainingNames, removedNames, removePricing)
 	}
 	if repository, ok := s.connRepository.(ScopedRealDisconnectRepository); ok {
 		return repository.DeleteRealConnectionWithPricingMapping(ctx, *conn, removePricing)
@@ -592,6 +735,33 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 		return s.removeUpstreamMappingAndDeleteConnection(ctx, userID, adminAccountID, req.ConnectionID, conn.UpstreamSiteID, conn.UpstreamGroupName)
 	}
 	return s.connRepository.DeleteRealConnection(ctx, req.ConnectionID, userID, adminAccountID)
+}
+
+func normalizeDisconnectGroupIDs(selected, available []string) []string {
+	if len(selected) == 0 {
+		return nil
+	}
+	allowed := make(map[string]struct{}, len(available))
+	for _, id := range available {
+		allowed[id] = struct{}{}
+	}
+	result := make([]string, 0, len(selected))
+	seen := make(map[string]struct{}, len(selected))
+	for _, id := range selected {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if _, ok := allowed[id]; !ok {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		result = append(result, id)
+	}
+	return result
 }
 
 func publicRealConnection(conn RealConnection) RealConnection {

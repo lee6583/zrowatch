@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertCircle, Image as ImageIcon, Loader2, Paperclip, X } from 'lucide-vue-next'
+import { Select } from '@/components/ui/select'
 import { createEmbedTicket } from '../api/tickets'
 
 const props = withDefaults(defineProps<{
@@ -183,26 +184,26 @@ const submit = async () => {
                     {{ t('embed.tickets.form.category') }}
                     <span class="text-red-500 dark:text-red-400">*</span>
                   </label>
-                  <select
+                  <Select
                     v-model="category"
-                    class="h-10 w-full rounded-lg border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                    class="h-10"
                   >
                     <option value="" disabled>{{ t('embed.tickets.form.categoryPlaceholder') }}</option>
                     <option v-for="option in categoryOptions" :key="option" :value="option">{{ option }}</option>
-                  </select>
+                  </Select>
                 </div>
                 <div>
                   <label class="mb-1 block text-xs font-medium text-muted-foreground">
                     {{ t('embed.tickets.form.priority') }}
                     <span class="text-red-500 dark:text-red-400">*</span>
                   </label>
-                  <select
+                  <Select
                     v-model="priority"
-                    class="h-10 w-full rounded-lg border border-border/50 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary"
+                    class="h-10"
                   >
                     <option value="" disabled>{{ t('embed.tickets.form.priorityPlaceholder') }}</option>
                     <option v-for="option in priorityOptions" :key="option" :value="option">{{ option }}</option>
-                  </select>
+                  </Select>
                 </div>
               </div>
 

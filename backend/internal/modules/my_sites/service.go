@@ -33,6 +33,10 @@ type RealConnectionRepository interface {
 	DeleteRealConnection(ctx context.Context, id string, userID string, adminAccountID string) error
 }
 
+type RealConnectionNameUpdater interface {
+	UpdateRealConnectionAdminAccountName(ctx context.Context, id string, userID string, adminAccountID string, name string) error
+}
+
 type AtomicRealDisconnectRepository interface {
 	RemoveUpstreamMappingAndDeleteConnection(ctx context.Context, userID string, adminAccountID string, connectionID string, siteID string, groupName string) error
 }
@@ -52,6 +56,14 @@ type ScopedRealDisconnectRepository interface {
 	DeleteRealConnectionWithPricingMapping(ctx context.Context, conn RealConnection, removePricingMapping bool) error
 }
 
+type PartialRealDisconnectRepository interface {
+	PartialDisconnectRealConnection(ctx context.Context, conn RealConnection, remainingGroupIDs, remainingGroupNames, removedGroupNames []string, removePricingMapping bool) error
+}
+
+type RealConnectionGroupUpdater interface {
+	UpdateRealConnectionGroups(ctx context.Context, conn RealConnection, groupIDs, groupNames, addedGroupNames, removedGroupNames []string) error
+}
+
 // UpstreamSiteLookup 根据 ID 获取上游站点信息（含 Session），供真实对接流程使用。
 type UpstreamSiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
@@ -61,6 +73,16 @@ type UpstreamSiteLookup interface {
 // 自动调价成功后通过此接口向用户配置的机器人发送通知。
 type BotNotifier interface {
 	SendToBots(ctx context.Context, userID string, botIDs []string, message string)
+}
+
+// AccountRenameResult describes one target account name synchronization
+// attempt. Status is one of updated, unchanged, skipped, missing, or failed.
+type AccountRenameResult struct {
+	GroupName string
+	AccountID string
+	OldName   string
+	NewName   string
+	Status    string
 }
 
 // Service 负责分组映射的查询与保存，以及真实对接的编排。
@@ -1096,6 +1118,7 @@ func removeMappingTargetFromState(state *State, siteID string, groupName string)
 
 // changedGroup 表示一个上游分组在同步前后倍率发生了变化。
 type changedGroup struct {
+	GroupID       string
 	GroupName     string
 	OldMultiplier float64
 	NewMultiplier float64
@@ -1115,12 +1138,10 @@ func changedUpstreamGroups(oldMetrics, newMetrics upstream.Metrics) []changedGro
 		return nil
 	}
 	oldMap := make(map[string]float64, len(oldMetrics.Groups))
-	oldNameMap := make(map[string]string, len(oldMetrics.Groups))
 	for _, g := range oldMetrics.Groups {
 		if g.Multiplier != nil {
 			key := g.ID + "|" + g.Name
 			oldMap[key] = *g.Multiplier
-			oldNameMap[key] = g.Name
 		}
 	}
 	var result []changedGroup
@@ -1134,6 +1155,7 @@ func changedUpstreamGroups(oldMetrics, newMetrics upstream.Metrics) []changedGro
 			continue
 		}
 		result = append(result, changedGroup{
+			GroupID:       g.ID,
 			GroupName:     g.Name,
 			OldMultiplier: oldVal,
 			NewMultiplier: *g.Multiplier,
@@ -1473,6 +1495,229 @@ func (s *Service) ApplyAutoPricingAfterSync(ctx context.Context, userID, adminAc
 		result := s.processAutoPricing(ctx, userID, adminAccountID, state, mapping, siteID, siteName, changesByGroup, newMetrics.Groups, adminGroupMap, lookupFn)
 		logAutoPricingResult(siteName, result)
 	}
+}
+
+// SyncSub2APIAccountNamesAfterRateChanges updates names of existing Sub2API
+// accounts created or bound by this workspace when an upstream group's
+// multiplier changes. Remote failures are isolated per account so callers can
+// continue the normal monitoring and notification flow.
+func (s *Service) SyncSub2APIAccountNamesAfterRateChanges(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) []AccountRenameResult {
+	changes := changedUpstreamGroups(oldMetrics, newMetrics)
+	if len(changes) == 0 || s.connRepository == nil || s.repository == nil || s.platformService == nil {
+		return nil
+	}
+	log.Printf("[account-name-sync] start site_id=%s groups=%d", siteID, len(changes))
+
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		log.Printf("[account-name-sync] list bindings failed user_id=%s site_id=%s err=%v", userID, siteID, err)
+		return []AccountRenameResult{{Status: "failed"}}
+	}
+	state, err := s.repository.Get(ctx, userID, adminAccountID)
+	if err != nil || state == nil || state.Session.Platform != upstream.PlatformSub2API || !state.Session.IsAuthenticated() {
+		platform := ""
+		authenticated := false
+		if state != nil {
+			platform = string(state.Session.Platform)
+			authenticated = state.Session.IsAuthenticated()
+		}
+		log.Printf("[account-name-sync] target session unavailable user_id=%s admin_account_id=%s site_id=%s platform=%s authenticated=%t err=%v", userID, adminAccountID, siteID, platform, authenticated, err)
+		return []AccountRenameResult{{Status: "failed"}}
+	}
+	refreshedSession, err := s.platformService.RefreshSession(state.Session)
+	if err != nil {
+		log.Printf("[account-name-sync] target session refresh failed user_id=%s admin_account_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, err)
+		return []AccountRenameResult{{Status: "failed"}}
+	}
+	if refreshedSession.AccessToken != state.Session.AccessToken || refreshedSession.RefreshToken != state.Session.RefreshToken ||
+		refreshedSession.Cookie != state.Session.Cookie || refreshedSession.ExpiresAt != state.Session.ExpiresAt {
+		state.Session = refreshedSession
+		if err := s.repository.Save(ctx, *state); err != nil {
+			log.Printf("[account-name-sync] refreshed target session save failed user_id=%s admin_account_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, err)
+			return []AccountRenameResult{{Status: "failed"}}
+		}
+	}
+
+	changeByName := make(map[string]changedGroup, len(changes))
+	for _, change := range changes {
+		changeByName[change.GroupName] = change
+	}
+	results := make([]AccountRenameResult, 0)
+	matchedGroups := make(map[string]bool, len(changes))
+	seenAccounts := make(map[string]struct{})
+	for _, conn := range connections {
+		if conn.UpstreamSiteID != siteID ||
+			(strings.TrimSpace(conn.AdminPlatform) != "" && conn.AdminPlatform != string(upstream.PlatformSub2API)) ||
+			(strings.TrimSpace(conn.Status) != "" && conn.Status != ConnectionStatusActive) ||
+			strings.TrimSpace(conn.AdminAccountID) == "" {
+			continue
+		}
+		change, ok := changeByName[conn.UpstreamGroupName]
+		if !ok {
+			for _, candidate := range changes {
+				if candidate.GroupID != "" && candidate.GroupID == conn.UpstreamGroupID {
+					change = candidate
+					ok = true
+					break
+				}
+			}
+		}
+		if !ok {
+			continue
+		}
+		accountID := strings.TrimSpace(conn.AdminAccountID)
+		if _, seen := seenAccounts[accountID]; seen {
+			continue
+		}
+		seenAccounts[accountID] = struct{}{}
+		matchedGroups[change.GroupName] = true
+		remoteState, err := s.platformService.GetSub2APIAdminAccountState(state.Session, accountID)
+		result := AccountRenameResult{GroupName: change.GroupName, AccountID: accountID}
+		if err != nil {
+			result.Status = "failed"
+			results = append(results, result)
+			log.Printf("[account-name-sync] remote account GET failed site_id=%s group=%s account_id=%s err=%v", siteID, conn.UpstreamGroupName, accountID, err)
+			continue
+		}
+		result.OldName = remoteState.Name
+		newName, ok := replaceTrailingMultiplier(remoteState.Name, change.NewMultiplier)
+		if !ok {
+			result.Status = "skipped"
+			results = append(results, result)
+			log.Printf("[account-name-sync] skip malformed remote account name site_id=%s group=%s account_id=%s name=%q", siteID, conn.UpstreamGroupName, accountID, remoteState.Name)
+			continue
+		}
+		result.NewName = newName
+		if newName == remoteState.Name {
+			result.Status = "unchanged"
+			s.updateLocalBindingNames(ctx, connections, siteID, accountID, userID, adminAccountID, newName)
+			results = append(results, result)
+			log.Printf("[account-name-sync] unchanged site_id=%s group=%s account_id=%s name=%q", siteID, change.GroupName, accountID, remoteState.Name)
+			continue
+		}
+		if err := s.platformService.UpdateSub2APIAdminAccountName(state.Session, accountID, newName); err != nil {
+			result.Status = "failed"
+			results = append(results, result)
+			log.Printf("[account-name-sync] rename failed site_id=%s group=%s account_id=%s err=%v", siteID, conn.UpstreamGroupName, accountID, err)
+			continue
+		}
+		s.updateLocalBindingNames(ctx, connections, siteID, accountID, userID, adminAccountID, newName)
+		result.Status = "updated"
+		results = append(results, result)
+		log.Printf("[account-name-sync] updated site_id=%s group=%s account_id=%s old=%q new=%q", siteID, change.GroupName, accountID, result.OldName, result.NewName)
+	}
+	results = s.syncLegacyAccountNames(ctx, state.Session, siteName, changes, matchedGroups, results)
+	for _, change := range changes {
+		if !matchedGroups[change.GroupName] {
+			log.Printf("[account-name-sync] no matching bound account site_id=%s group=%s old_multiplier=%s", siteID, change.GroupName, formatMultiplierValue(change.OldMultiplier))
+			results = append(results, AccountRenameResult{GroupName: change.GroupName, Status: "missing"})
+		}
+	}
+	return results
+}
+
+func (s *Service) updateLocalBindingNames(ctx context.Context, connections []RealConnection, siteID, accountID, userID, adminAccountID, name string) {
+	updater, ok := s.connRepository.(RealConnectionNameUpdater)
+	if !ok {
+		return
+	}
+	for _, conn := range connections {
+		if conn.UpstreamSiteID != siteID || conn.AdminAccountID != accountID {
+			continue
+		}
+		if err := updater.UpdateRealConnectionAdminAccountName(ctx, conn.ID, userID, adminAccountID, name); err != nil {
+			log.Printf("[account-name-sync] local binding name update failed connection_id=%s account_id=%s err=%v", conn.ID, accountID, err)
+		}
+	}
+}
+
+func (s *Service) syncLegacyAccountNames(ctx context.Context, session upstream.Session, siteName string, changes []changedGroup, matchedGroups map[string]bool, results []AccountRenameResult) []AccountRenameResult {
+	if strings.TrimSpace(siteName) == "" || len(changes) == 0 {
+		return results
+	}
+	hasUnmatched := false
+	for _, change := range changes {
+		if !matchedGroups[change.GroupName] {
+			hasUnmatched = true
+			break
+		}
+	}
+	if !hasUnmatched {
+		return results
+	}
+	accounts, err := s.platformService.ListSub2APIAdminAccounts(session)
+	if err != nil {
+		log.Printf("[account-name-sync] legacy account lookup failed site_name=%s err=%v", siteName, err)
+		return results
+	}
+	for _, change := range changes {
+		if matchedGroups[change.GroupName] {
+			continue
+		}
+		suffix := "【" + siteName + "】-" + formatMultiplierValue(change.OldMultiplier) + "x"
+		candidates := make([]upstream.AdminGroupAccountInfo, 0, 1)
+		for _, account := range accounts {
+			if strings.HasSuffix(strings.TrimSpace(account.Name), suffix) && strings.TrimSpace(account.ID) != "" {
+				candidates = append(candidates, account)
+			}
+		}
+		if len(candidates) != 1 {
+			log.Printf("[account-name-sync] legacy match skipped site_name=%s group=%s old_multiplier=%s candidates=%d reason=not_unique", siteName, change.GroupName, formatMultiplierValue(change.OldMultiplier), len(candidates))
+			continue
+		}
+		candidate := candidates[0]
+		newName, ok := replaceTrailingMultiplier(candidate.Name, change.NewMultiplier)
+		if !ok {
+			log.Printf("[account-name-sync] legacy match skipped site_name=%s group=%s account_id=%s name=%q reason=malformed_name", siteName, change.GroupName, candidate.ID, candidate.Name)
+			continue
+		}
+		result := AccountRenameResult{GroupName: change.GroupName, AccountID: candidate.ID, OldName: candidate.Name, NewName: newName}
+		if err := s.platformService.UpdateSub2APIAdminAccountName(session, candidate.ID, newName); err != nil {
+			result.Status = "failed"
+			log.Printf("[account-name-sync] legacy rename failed site_name=%s group=%s account_id=%s err=%v", siteName, change.GroupName, candidate.ID, err)
+		} else {
+			result.Status = "updated"
+		}
+		results = append(results, result)
+		matchedGroups[change.GroupName] = true
+	}
+	return results
+}
+
+func replaceTrailingMultiplier(name string, multiplier float64) (string, bool) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", false
+	}
+	marker := strings.LastIndex(trimmed, "x")
+	if marker != len(trimmed)-1 || marker == 0 {
+		return "", false
+	}
+	start := marker - 1
+	for start >= 0 && ((trimmed[start] >= '0' && trimmed[start] <= '9') || trimmed[start] == '.') {
+		start--
+	}
+	if start == marker-1 {
+		return "", false
+	}
+	oldRate := trimmed[start+1 : marker]
+	if strings.Count(oldRate, ".") > 1 || oldRate == "." {
+		return "", false
+	}
+	if _, err := strconv.ParseFloat(oldRate, 64); err != nil {
+		return "", false
+	}
+	newRate := formatMultiplierValue(multiplier)
+	return trimmed[:start+1] + newRate + "x", true
+}
+
+func formatMultiplierValue(value float64) string {
+	formatted := strconv.FormatFloat(value, 'f', 4, 64)
+	formatted = strings.TrimRight(strings.TrimRight(formatted, "0"), ".")
+	if formatted == "" || formatted == "-0" {
+		return "0"
+	}
+	return formatted
 }
 
 // buildChangesByGroup 从同步前后的 Metrics 构建按 GroupName 索引的倍率变化快照。

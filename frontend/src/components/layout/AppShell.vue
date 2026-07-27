@@ -80,7 +80,7 @@ onMounted(() => {
     <footer class="border-t border-border/30 bg-surface/30 py-12 backdrop-blur-sm">
       <div class="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 flex flex-col md:flex-row justify-between items-center gap-6">
         <div class="flex items-center gap-2">
-          <span class="text-xl font-bold tracking-tight text-muted-foreground">TransitHub</span>
+          <span class="text-xl font-bold tracking-tight text-muted-foreground">{{ t('brand.name') }}</span>
         </div>
         <p class="text-sm text-muted-foreground">
           &copy; {{ new Date().getFullYear() }} {{ t('footer.rights') }}

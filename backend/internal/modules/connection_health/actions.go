@@ -61,13 +61,25 @@ const (
 // new-api 通过 admin channel 的 weight/status 实现降级/恢复；sub2api 通过 admin account 的
 // status（active/inactive）实现降级/恢复，不涉及 priority。
 type remoteActionDispatcher struct {
-	sites    SiteLookup
-	sessions SessionProvider
-	platform PlatformActioner
+	sites         SiteLookup
+	sessions      SessionProvider
+	platform      PlatformActioner
+	balancePauses BalancePauseLookup
 }
 
 func newRemoteActionDispatcher(sites SiteLookup, sessions SessionProvider, platform PlatformActioner) *remoteActionDispatcher {
 	return &remoteActionDispatcher{sites: sites, sessions: sessions, platform: platform}
+}
+
+func (d *remoteActionDispatcher) SetBalancePauseLookup(lookup BalancePauseLookup) {
+	d.balancePauses = lookup
+}
+
+func (d *remoteActionDispatcher) balancePaused(ctx context.Context, conn my_sites.RealConnection) (bool, error) {
+	if d.balancePauses == nil || conn.AdminAccountID == "" {
+		return false, nil
+	}
+	return d.balancePauses.IsAccountBalancePaused(ctx, conn.UserID, conn.WorkspaceAdminAccountID, conn.UpstreamSiteID, conn.AdminAccountID)
 }
 
 func (d *remoteActionDispatcher) Degrade(ctx context.Context, conn my_sites.RealConnection, state ConnectionHealthState) (remoteAction string, err error) {
@@ -77,6 +89,12 @@ func (d *remoteActionDispatcher) Degrade(ctx context.Context, conn my_sites.Real
 			err = fmt.Errorf("remote degrade panic recovered: %v", r)
 		}
 	}()
+	if paused, pauseErr := d.balancePaused(ctx, conn); paused || pauseErr != nil {
+		if pauseErr != nil {
+			return RemoteActionSkippedBalanceSuspended, pauseErr
+		}
+		return RemoteActionSkippedBalanceSuspended, nil
+	}
 
 	site, siteErr := d.sites.GetSite(ctx, conn.UpstreamSiteID)
 	if siteErr != nil || site == nil {
@@ -100,6 +118,12 @@ func (d *remoteActionDispatcher) Restore(ctx context.Context, conn my_sites.Real
 			err = fmt.Errorf("remote restore panic recovered: %v", r)
 		}
 	}()
+	if paused, pauseErr := d.balancePaused(ctx, conn); paused || pauseErr != nil {
+		if pauseErr != nil {
+			return RemoteActionSkippedBalanceSuspended, pauseErr
+		}
+		return RemoteActionSkippedBalanceSuspended, nil
+	}
 
 	site, siteErr := d.sites.GetSite(ctx, conn.UpstreamSiteID)
 	if siteErr != nil || site == nil {

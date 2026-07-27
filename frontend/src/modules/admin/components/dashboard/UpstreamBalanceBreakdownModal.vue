@@ -47,6 +47,7 @@ const statusClasses: Record<UpstreamStatus, string> = {
   connecting: 'bg-primary/10 text-primary border-primary/20',
   syncing: 'bg-warning/10 text-warning border-warning/20',
   connected: 'bg-signal/10 text-signal border-signal/20',
+  disabled: 'bg-destructive/10 text-destructive border-destructive/20',
   error: 'bg-warning/10 text-warning border-warning/20',
 }
 

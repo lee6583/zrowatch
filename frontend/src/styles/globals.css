@@ -68,18 +68,23 @@ body,
   min-height: 100%;
 }
 
-body {
-  margin: 0;
-  background-color: hsl(var(--background));
-  color: hsl(var(--foreground));
-  font-family: 'Segoe UI Variable', 'Segoe UI', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-  text-rendering: optimizeLegibility;
-  transition: color 0.3s ease, background-color 0.3s ease;
-}
+  body {
+    margin: 0;
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+    font-family: 'Segoe UI Variable', 'Segoe UI', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    text-rendering: optimizeLegibility;
+    transition: color 0.3s ease, background-color 0.3s ease;
+  }
 
-a {
-  color: inherit;
-}
+  a {
+    color: inherit;
+  }
+
+  table thead th,
+  table tbody td {
+    text-align: center !important;
+  }
 
 ::selection {
   background: hsl(var(--primary) / 0.24);

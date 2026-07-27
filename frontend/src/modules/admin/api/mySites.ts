@@ -9,6 +9,7 @@ import type {
   RealConnectResponse,
   RealConnection,
   RealDisconnectRequest,
+  UpdateRealConnectionGroupsRequest,
   UpstreamKeyItem,
   AdminResourceOption,
 } from '../types/mySites'
@@ -155,6 +156,13 @@ export const realDisconnect = async (req: RealDisconnectRequest): Promise<void> 
     body: JSON.stringify(req),
   })
 }
+
+export const updateRealConnectionGroups = async (req: UpdateRealConnectionGroupsRequest): Promise<RealConnection> => (
+  requestJson<RealConnection>(`/my-sites/real-connections/${encodeURIComponent(req.connectionId)}/groups`, {
+    method: 'PATCH',
+    body: JSON.stringify({ ownGroupIds: req.ownGroupIds }),
+  })
+)
 
 export const runAutoPricing = async (req: RunAutoPricingRequest): Promise<RunAutoPricingResponse> => {
   const response = await requestJson<RunAutoPricingResponse>('/my-sites/auto-pricing/run', {

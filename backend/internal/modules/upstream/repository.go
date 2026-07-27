@@ -33,6 +33,9 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			remark text NOT NULL DEFAULT '',
 			recharge_rate double precision NOT NULL DEFAULT 1,
 			status text NOT NULL,
+			balance_suspended boolean NOT NULL DEFAULT false,
+			balance_suspended_at timestamptz NULL,
+			balance_pause_reason text NOT NULL DEFAULT '',
 			error_key text NULL,
 			metrics jsonb NOT NULL,
 			session jsonb NULL,
@@ -52,6 +55,15 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		ALTER TABLE upstream_sites ADD COLUMN IF NOT EXISTS settings jsonb NOT NULL DEFAULT '{}'::jsonb
 	`); err != nil {
 		return err
+	}
+	for _, statement := range []string{
+		`ALTER TABLE upstream_sites ADD COLUMN IF NOT EXISTS balance_suspended boolean NOT NULL DEFAULT false`,
+		`ALTER TABLE upstream_sites ADD COLUMN IF NOT EXISTS balance_suspended_at timestamptz NULL`,
+		`ALTER TABLE upstream_sites ADD COLUMN IF NOT EXISTS balance_pause_reason text NOT NULL DEFAULT ''`,
+	} {
+		if _, err := r.db.Exec(ctx, statement); err != nil {
+			return err
+		}
 	}
 	// 工作区隔离字段：每个站点归属到一个 admin workspace。
 	if _, err := r.db.Exec(ctx, `
@@ -82,7 +94,8 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 func (r *Repository) ListSites(ctx context.Context) ([]Site, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, name, base_url, platform, requested_platform, account, remark,
-			recharge_rate, status, error_key, metrics, session, settings, last_synced_at
+			recharge_rate, status, balance_suspended, balance_suspended_at, balance_pause_reason,
+			error_key, metrics, session, settings, last_synced_at
 		FROM upstream_sites
 		WHERE user_id <> ''
 		ORDER BY created_at ASC, id ASC
@@ -96,7 +109,8 @@ func (r *Repository) ListSites(ctx context.Context) ([]Site, error) {
 func (r *Repository) ListSitesForUser(ctx context.Context, userID string) ([]Site, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT id, user_id, admin_account_id, name, base_url, platform, requested_platform, account, remark,
-			recharge_rate, status, error_key, metrics, session, settings, last_synced_at
+			recharge_rate, status, balance_suspended, balance_suspended_at, balance_pause_reason,
+			error_key, metrics, session, settings, last_synced_at
 		FROM upstream_sites
 		WHERE user_id = $1
 		ORDER BY created_at ASC, id ASC
@@ -130,10 +144,11 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 	result, err := r.db.Exec(ctx, `
 		INSERT INTO upstream_sites (
 			id, user_id, admin_account_id, name, base_url, platform, requested_platform, account, remark,
-			recharge_rate, status, error_key, metrics, session, settings, last_synced_at,
+			recharge_rate, status, balance_suspended, balance_suspended_at, balance_pause_reason,
+			error_key, metrics, session, settings, last_synced_at,
 			created_at, updated_at
 		)
-		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $17
+		SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::jsonb, $17::jsonb, $18::jsonb, $19, $20, $20
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = $2 AND id = $3)
 		ON CONFLICT (id) DO UPDATE SET
 			user_id = EXCLUDED.user_id,
@@ -146,6 +161,9 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 			remark = EXCLUDED.remark,
 			recharge_rate = EXCLUDED.recharge_rate,
 			status = EXCLUDED.status,
+			balance_suspended = EXCLUDED.balance_suspended,
+			balance_suspended_at = EXCLUDED.balance_suspended_at,
+			balance_pause_reason = EXCLUDED.balance_pause_reason,
 			error_key = EXCLUDED.error_key,
 			metrics = EXCLUDED.metrics,
 			session = EXCLUDED.session,
@@ -154,7 +172,8 @@ func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 			updated_at = EXCLUDED.updated_at
 		WHERE EXISTS (SELECT 1 FROM admin_accounts WHERE user_id = EXCLUDED.user_id AND id = EXCLUDED.admin_account_id)
 	`, site.ID, site.UserID, site.AdminAccountID, site.Name, site.BaseURL, site.Platform, site.RequestedPlatform, site.Account, site.Remark,
-		site.RechargeRate, site.Status, site.ErrorKey, string(metricsJSON), nullableJSONString(sessionJSON), string(settingsJSON), site.LastSyncedAt, now)
+		site.RechargeRate, site.Status, site.BalanceSuspended, nullableTime(site.BalanceSuspendedAt), site.BalancePauseReason,
+		site.ErrorKey, string(metricsJSON), nullableJSONString(sessionJSON), string(settingsJSON), site.LastSyncedAt, now)
 	if err != nil {
 		return err
 	}
@@ -177,6 +196,9 @@ func (r *Repository) DeleteSite(ctx context.Context, userID string, id string) e
 	if _, err := tx.Exec(ctx, `DELETE FROM group_rate_snapshots WHERE user_id = $1 AND site_id = $2`, userID, id); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM upstream_balance_account_pauses WHERE user_id = $1 AND upstream_site_id = $2`, userID, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM upstream_sites WHERE user_id = $1 AND id = $2`, userID, id); err != nil {
 		return err
 	}
@@ -192,6 +214,7 @@ func scanSites(rows pgx.Rows) ([]Site, error) {
 		var metricsJSON []byte
 		var sessionJSON []byte
 		var settingsJSON []byte
+		var balanceSuspendedAt *time.Time
 		if err := rows.Scan(
 			&site.ID,
 			&site.UserID,
@@ -204,6 +227,9 @@ func scanSites(rows pgx.Rows) ([]Site, error) {
 			&site.Remark,
 			&site.RechargeRate,
 			&site.Status,
+			&site.BalanceSuspended,
+			&balanceSuspendedAt,
+			&site.BalancePauseReason,
 			&site.ErrorKey,
 			&metricsJSON,
 			&sessionJSON,
@@ -225,6 +251,10 @@ func scanSites(rows pgx.Rows) ([]Site, error) {
 		if len(settingsJSON) > 0 {
 			_ = json.Unmarshal(settingsJSON, &site.Settings)
 		}
+		if balanceSuspendedAt != nil {
+			value := balanceSuspendedAt.UnixMilli()
+			site.BalanceSuspendedAt = &value
+		}
 		sites = append(sites, site)
 	}
 	if err := rows.Err(); err != nil {
@@ -238,4 +268,11 @@ func nullableJSONString(value []byte) any {
 		return nil
 	}
 	return string(value)
+}
+
+func nullableTime(value *int64) any {
+	if value == nil {
+		return nil
+	}
+	return time.UnixMilli(*value)
 }

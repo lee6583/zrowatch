@@ -26,6 +26,11 @@ type fakeRepository struct {
 	groupExclusions    []GroupTargetExclusion
 	priorityStates     map[string]PrioritySyncState
 	targetActionStates map[string]TargetActionState
+	groupRateSettings  map[string]GroupRateMonitorSettings
+	groupRateOverrides map[string][]GroupRateMonitorOverride
+	groupRateStates    map[string]GroupRateMonitorTargetState
+	groupRateCycles    []GroupRateProbeCycle
+	groupRateActions   map[string]GroupRateMonitorActionState
 	budgetClaims       map[string]int
 	savePolicyErr      error
 }
@@ -35,6 +40,10 @@ func newFakeRepository() *fakeRepository {
 		states:             map[string]map[string]ConnectionHealthState{},
 		priorityStates:     map[string]PrioritySyncState{},
 		targetActionStates: map[string]TargetActionState{},
+		groupRateSettings:  map[string]GroupRateMonitorSettings{},
+		groupRateOverrides: map[string][]GroupRateMonitorOverride{},
+		groupRateStates:    map[string]GroupRateMonitorTargetState{},
+		groupRateActions:   map[string]GroupRateMonitorActionState{},
 		budgetClaims:       map[string]int{},
 	}
 }

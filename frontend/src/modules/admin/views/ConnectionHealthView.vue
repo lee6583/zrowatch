@@ -16,6 +16,7 @@ import {
   ShieldCheck,
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/select'
 import { listUpstreamSites } from '../api/upstream'
 import { connectionHealthMessageKey, useConnectionHealth } from '../composables/useConnectionHealth'
 import AdminGroupHealthDetail from '../components/dashboard/AdminGroupHealthDetail.vue'
@@ -134,6 +135,10 @@ const openSetup = (group: AdminGroupHealth) => {
 const onSetupSaved = async () => {
   setupDrawerOpen.value = false
   await Promise.all([loadAll({ silent: true }), loadPolicies()])
+}
+
+const onSchedulingChanged = async () => {
+  await loadAll({ silent: true })
 }
 
 // 一次性手动探活：不写状态/事件，不触发远端动作。
@@ -305,10 +310,10 @@ const togglePolicyEnabled = async (policy: ConnectionHealthPolicy) => {
                 class="h-10 w-full rounded-lg border border-border/60 bg-background pl-9 pr-3 text-sm text-foreground outline-none placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/20"
               >
             </div>
-            <select v-model="selectedType" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground">
+            <Select v-model="selectedType" class="h-9">
               <option value="">{{ t('admin.connectionHealth.filters.allTypes') }}</option>
               <option v-for="type in groupTypes" :key="type" :value="type">{{ groupTypeLabel(type) }}</option>
-            </select>
+            </Select>
           </div>
 
           <nav class="max-h-[28rem] flex-1 overflow-y-auto p-2 lg:max-h-[calc(100dvh-20rem)]" :aria-label="t('admin.connectionHealth.groupListLabel')">
@@ -351,6 +356,7 @@ const togglePolicyEnabled = async (policy: ConnectionHealthPolicy) => {
           @setup="openSetup"
           @probe="onProbeAccount"
           @view-events="onViewEventsAccount"
+          @scheduling-changed="onSchedulingChanged"
         />
       </div>
     </section>

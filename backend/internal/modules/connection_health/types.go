@@ -52,6 +52,7 @@ const (
 
 const (
 	ErrorRequest          = "admin.connectionHealth.errors.request"
+	ErrorBalanceSuspended = "admin.connectionHealth.errors.balanceSuspended"
 	ErrorUnknown          = "admin.connectionHealth.errors.unknown"
 	ErrorNotFound         = "admin.connectionHealth.errors.notFound"
 	ErrorNoCurrentAccount = "admin.adminAccounts.errors.noCurrentAccount"
@@ -70,8 +71,17 @@ const (
 	// ErrorManualModelsRequired：手动一次性探活请求体的 models 为空。
 	ErrorManualModelsRequired = "admin.connectionHealth.errors.manualModelsRequired"
 	// ErrorPolicyNotFound：分配策略时传入的 policyId 不属于当前 workspace 或不存在。
-	ErrorPolicyNotFound = "admin.connectionHealth.errors.policyNotFound"
+	ErrorPolicyNotFound                = "admin.connectionHealth.errors.policyNotFound"
+	ErrorGroupRateMonitorModelRequired = "admin.groupRates.health.errors.modelRequired"
+	ErrorGroupRateMonitorDisabled      = "admin.groupRates.health.errors.disabled"
 )
+
+// TargetDispatchState is the non-sensitive Sub2API account state returned after
+// a manual dispatch switch update.
+type TargetDispatchState struct {
+	Status      string `json:"status"`
+	Schedulable bool   `json:"schedulable"`
+}
 
 // PolicyAssignment 对应 connection_health_policy_assignments 表：一条「target 显式绑定某条策略」
 // 的分配关系。调度器只对已分配 enabled 策略的 target 自动探活，未分配的 target 永不自动探活。
@@ -260,6 +270,13 @@ type MySitesReader interface {
 // SiteLookup 是 connection_health 对 upstream 模块的只读依赖：按站点 ID 取 base_url 和平台类型。
 type SiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
+}
+
+// BalancePauseLookup prevents health automation and manual scheduling from
+// re-enabling an account that the balance guard owns.
+type BalancePauseLookup interface {
+	IsAccountBalancePaused(ctx context.Context, userID, adminAccountID, siteID, accountID string) (bool, error)
+	IsAccountBalancePausedForWorkspace(ctx context.Context, userID, adminAccountID, accountID string) (bool, error)
 }
 
 // PlatformGroupReader 是 connection_health 对 upstream.PlatformService 的窄只读依赖：

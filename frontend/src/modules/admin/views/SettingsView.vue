@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { Plus, Save, Loader2, CheckCircle2, MessageSquare, Send, Trash2, Timer, AlertTriangle, TrendingUp, Info, Mail } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import EmailTemplatesPanel from '../components/settings/EmailTemplatesPanel.vue'
 import {
   getNotificationChannelSettings,
@@ -908,14 +909,10 @@ onMounted(async () => {
               </div>
               <div class="grid gap-2">
                 <label for="smtp-tls-mode" class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.smtp.tlsMode') }}</label>
-                <select
-                  id="smtp-tls-mode"
-                  v-model="smtpTlsMode"
-                  class="flex h-9 w-full rounded-lg border border-input bg-background px-3 text-sm ring-offset-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                >
+                <Select id="smtp-tls-mode" v-model="smtpTlsMode" class="h-9">
                   <option value="starttls">{{ t('admin.settings.smtp.tlsStarttls') }}</option>
                   <option value="implicit">{{ t('admin.settings.smtp.tlsImplicit') }}</option>
-                </select>
+                </Select>
               </div>
               <div class="grid gap-2">
                 <label for="smtp-username" class="text-xs font-medium text-muted-foreground">{{ t('admin.settings.smtp.username') }}</label>

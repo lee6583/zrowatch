@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { X, Zap, ZapOff, Calculator, CircleHelp, Bell, BellOff, Copy, Check, Loader2 } from 'lucide-vue-next'
+import { Select } from '@/components/ui/select'
 import { Tooltip } from '@/components/ui/tooltip'
 import type { MySiteMapping, MySiteGroupRef, AutoPricingSource, AutoPricingStrategy } from '../../types/mySites'
 
@@ -316,22 +317,20 @@ const parseNumberInput = (value: string): number | null => {
                   <!-- Pricing Source -->
                   <div class="space-y-1.5">
                     <label class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.sourceLabel`) }}</label>
-                    <select
+                    <Select
                       v-model="autoPricingSource"
-                      class="w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                     >
                       <option v-for="opt in sourceOptions" :key="opt.value" :value="opt.value">
                         {{ t(opt.labelKey) }}
                       </option>
-                    </select>
+                    </Select>
                   </div>
 
                   <!-- Primary Upstream selector -->
                   <div v-if="autoPricingSource === 'primary_upstream'" class="space-y-1.5">
                     <label class="text-xs font-medium text-muted-foreground">{{ t(`${prefix}.primaryUpstreamLabel`) }}</label>
-                    <select
+                    <Select
                       v-model="primaryUpstreamKey"
-                      class="w-full rounded-lg border border-border/50 bg-background px-3 py-2 text-sm text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                     >
                       <option value="" disabled>{{ t(`${prefix}.primaryUpstreamPlaceholder`) }}</option>
                       <option
@@ -341,7 +340,7 @@ const parseNumberInput = (value: string): number | null => {
                       >
                         {{ target.groupName }} · {{ getUpstreamLabel(target.siteId) }}{{ getUpstreamMultiplier(target.siteId, target.groupName) != null ? ` · ${Number(getUpstreamMultiplier(target.siteId, target.groupName)!.toFixed(4))}×` : '' }}
                       </option>
-                    </select>
+                    </Select>
                   </div>
 
                   <!-- Strategy -->

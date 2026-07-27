@@ -15,6 +15,9 @@ import {
   ShieldCheck,
   ShieldQuestion,
   Zap,
+  Power,
+  PowerOff,
+  Loader2,
 } from 'lucide-vue-next'
 import { Tooltip } from '@/components/ui/tooltip'
 import {
@@ -22,6 +25,7 @@ import {
   connectionHealthStateBadgeClass,
   formatConnectionHealthTime,
 } from '../../composables/useConnectionHealth'
+import { updateTargetScheduling } from '../../api/connectionHealth'
 import type {
   AdminGroupAccount,
   AdminGroupHealth,
@@ -36,16 +40,20 @@ const emit = defineEmits<{
   (event: 'setup', group: AdminGroupHealth): void
   (event: 'probe', account: AdminGroupAccount): void
   (event: 'view-events', account: AdminGroupAccount): void
+  (event: 'scheduling-changed'): void
 }>()
 
 const { t, te } = useI18n()
 const prefix = 'admin.connectionHealth'
 const detailPrefix = `${prefix}.groupDetail`
 const expandedTargetId = ref('')
+const schedulingTargetId = ref('')
+const schedulingErrorKey = ref('')
 
 const monitoredCount = computed(() => props.group.monitoredAccountCount ?? props.group.accounts.filter((account) => account.hasAssignedPolicy).length)
 const lastProbeAt = computed(() => props.group.healthSummary?.lastProbeAt ?? null)
 const isNewAPI = computed(() => props.group.platform.toLowerCase().includes('new'))
+const isSub2API = computed(() => props.group.platform.toLowerCase().includes('sub2'))
 
 const strictDegradedCount = computed(() => Math.max(
   0,
@@ -93,6 +101,23 @@ const toggleModels = (targetId: string) => {
 }
 
 const formatNumber = (value: number | null | undefined): string => value == null ? '-' : String(value)
+
+const supportsScheduling = (account: AdminGroupAccount): boolean =>
+  isSub2API.value && account.schedulable !== undefined
+
+const toggleScheduling = async (account: AdminGroupAccount) => {
+	if (!supportsScheduling(account) || schedulingTargetId.value) return
+	schedulingErrorKey.value = ''
+	schedulingTargetId.value = account.targetId
+	try {
+		await updateTargetScheduling(account.targetId, !account.schedulable)
+		emit('scheduling-changed')
+	} catch (error) {
+		schedulingErrorKey.value = error instanceof Error ? error.message : `${prefix}.errors.request`
+	} finally {
+		schedulingTargetId.value = ''
+	}
+}
 </script>
 
 <template>
@@ -167,6 +192,10 @@ const formatNumber = (value: number | null | undefined): string => value == null
     </section>
 
     <div class="px-5 py-5">
+      <div v-if="schedulingErrorKey" class="mb-3 flex items-start gap-2 rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
+        <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+        <span>{{ readableMessage(schedulingErrorKey) }}</span>
+      </div>
       <div v-if="group.accountsError" class="rounded-lg bg-destructive/10 px-4 py-3 text-sm text-destructive">
         {{ readableMessage(group.accountsError) }}
       </div>
@@ -184,6 +213,7 @@ const formatNumber = (value: number | null | undefined): string => value == null
               <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.strategy`) }}</th>
               <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.priority`) }}</th>
               <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.multiplier`) }}</th>
+              <th class="px-3 py-2.5 font-medium">{{ t(`${detailPrefix}.columns.scheduling`) }}</th>
               <th class="px-3 py-2.5 text-right font-medium">{{ t(`${detailPrefix}.columns.actions`) }}</th>
             </tr>
           </thead>
@@ -245,6 +275,26 @@ const formatNumber = (value: number | null | undefined): string => value == null
                   {{ account.effectiveMultiplier == null ? (group.multiplierDisplay || '-') : `${account.effectiveMultiplier}x` }}
                 </td>
                 <td class="px-3 py-3">
+                  <template v-if="supportsScheduling(account)">
+                    <button
+                      type="button"
+                      class="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium transition-colors disabled:cursor-wait disabled:opacity-50"
+                      :class="account.schedulable
+                        ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-600 hover:bg-emerald-500/15 dark:text-emerald-400'
+                        : 'border-border/60 bg-muted text-muted-foreground hover:bg-surface'"
+                      :disabled="schedulingTargetId !== ''"
+                      :title="account.schedulable ? t(`${detailPrefix}.scheduling.disable`) : t(`${detailPrefix}.scheduling.enable`)"
+                      @click="toggleScheduling(account)"
+                    >
+                      <Loader2 v-if="schedulingTargetId === account.targetId" class="h-3.5 w-3.5 animate-spin" />
+                      <Power v-else-if="account.schedulable" class="h-3.5 w-3.5" />
+                      <PowerOff v-else class="h-3.5 w-3.5" />
+                      {{ account.schedulable ? t(`${detailPrefix}.scheduling.enabled`) : t(`${detailPrefix}.scheduling.disabled`) }}
+                    </button>
+                  </template>
+                  <span v-else class="text-xs text-muted-foreground">-</span>
+                </td>
+                <td class="px-3 py-3">
                   <div class="flex items-center justify-end gap-1">
                     <Tooltip :text="t(`${prefix}.actions.probe`)">
                       <button
@@ -272,7 +322,7 @@ const formatNumber = (value: number | null | undefined): string => value == null
                 </td>
               </tr>
               <tr v-if="expandedTargetId === account.targetId" class="border-t border-border/40 bg-surface/25">
-                <td colspan="7" class="px-12 py-4">
+                <td colspan="8" class="px-12 py-4">
                   <div v-if="account.modelHealth.length === 0 && unprobedModels(account).length === 0" class="text-xs text-muted-foreground">{{ t(`${detailPrefix}.models.empty`) }}</div>
                   <div v-else class="grid gap-2 lg:grid-cols-2">
                     <div v-for="model in account.modelHealth" :key="model.modelName" class="rounded-lg border border-border/50 bg-background px-3 py-2.5">

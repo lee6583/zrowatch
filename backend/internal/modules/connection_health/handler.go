@@ -21,6 +21,11 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/stored-summary", handler.storedSummary)
 	mux.HandleFunc("GET /api/connection-health/groups", handler.groups)
 	mux.HandleFunc("GET /api/connection-health/admin-groups", handler.adminGroups)
+	mux.HandleFunc("GET /api/connection-health/bound-dispatch-accounts", handler.boundDispatchAccounts)
+	mux.HandleFunc("GET /api/connection-health/group-rate-monitor/settings", handler.groupRateMonitorSettings)
+	mux.HandleFunc("PUT /api/connection-health/group-rate-monitor/settings", handler.putGroupRateMonitorSettings)
+	mux.HandleFunc("GET /api/connection-health/group-rate-monitor/summaries", handler.groupRateMonitorSummaries)
+	mux.HandleFunc("POST /api/connection-health/group-rate-monitor/probe", handler.probeGroupRateMonitor)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
 	mux.HandleFunc("POST /api/connection-health/connections/{id}/probe", handler.probe)
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/probe", handler.probeTarget)
@@ -33,8 +38,137 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("POST /api/connection-health/targets/{id}/manual-probe", handler.manualProbeTarget)
 	mux.HandleFunc("GET /api/connection-health/targets/{id}/policy-assignments", handler.getPolicyAssignments)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/policy-assignments", handler.putPolicyAssignments)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/scheduling", handler.updateScheduling)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/dispatch", handler.updateDispatch)
 	mux.HandleFunc("GET /api/connection-health/admin-groups/{id}/policy-configuration", handler.getAdminGroupPolicyConfiguration)
 	mux.HandleFunc("PUT /api/connection-health/admin-groups/{id}/policy-configuration", handler.putAdminGroupPolicyConfiguration)
+}
+
+func (h *Handler) groupRateMonitorSettings(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	result, err := h.service.GroupRateMonitorSettings(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) putGroupRateMonitorSettings(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input GroupRateMonitorSettingsInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.service.SaveGroupRateMonitorSettings(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) groupRateMonitorSummaries(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	result, err := h.service.GroupRateMonitorSummaries(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if result == nil {
+		result = []GroupRateMonitorSummary{}
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) probeGroupRateMonitor(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input GroupRateManualProbeInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.service.ProbeGroupRateMonitor(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) boundDispatchAccounts(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	accounts, err := h.service.BoundDispatchAccounts(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if accounts == nil {
+		accounts = []BoundDispatchAccountState{}
+	}
+	httpjson.Write(w, http.StatusOK, accounts)
+}
+
+func (h *Handler) updateDispatch(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || input.Enabled == nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	state, err := h.service.UpdateTargetDispatch(r.Context(), userID, r.PathValue("id"), *input.Enabled)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, state)
+}
+
+func (h *Handler) updateScheduling(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input struct {
+		Schedulable *bool `json:"schedulable"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || input.Schedulable == nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	if err := h.service.UpdateTargetScheduling(r.Context(), userID, r.PathValue("id"), *input.Schedulable); err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, map[string]any{"ok": true, "schedulable": *input.Schedulable})
 }
 
 func (h *Handler) storedSummary(w http.ResponseWriter, r *http.Request) {

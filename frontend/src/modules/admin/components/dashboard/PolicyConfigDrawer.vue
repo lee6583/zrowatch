@@ -2,6 +2,7 @@
 import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ArrowDownUp, BookOpenText, X, ShieldCheck, Plus, Trash2 } from 'lucide-vue-next'
+import { Select } from '@/components/ui/select'
 import { HelpTooltip } from '@/components/ui/tooltip'
 import PolicyRunFlowDialog from './PolicyRunFlowDialog.vue'
 import type { ConnectionHealthPolicy, ConnectionHealthPriorityMode, ModelTargetInput, PolicyInput } from '../../types/connectionHealth'
@@ -258,10 +259,10 @@ const handleSave = () => {
                     {{ t(`${prefix}.ownGroupLabel`) }}
                     <HelpTooltip :text="t(`${prefix}.tooltips.ownGroup`)" />
                   </label>
-                  <select v-model="ownGroupId" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground">
+                  <Select v-model="ownGroupId" class="h-9">
                     <option value="">{{ t(`${prefix}.ownGroupAllOption`) }}</option>
                     <option v-for="g in ownGroupOptions" :key="g.id" :value="g.id">{{ g.name }}</option>
-                  </select>
+                  </Select>
                 </div>
               </div>
 
@@ -283,10 +284,10 @@ const handleSave = () => {
                     {{ t(`${prefix}.providerLabel`) }}
                     <HelpTooltip :text="t(`${prefix}.tooltips.provider`)" />
                   </label>
-                  <select v-model="policyProvider" class="h-9 w-full rounded-lg border border-border/60 bg-background px-3 text-sm text-foreground">
+                  <Select v-model="policyProvider" class="h-9">
                     <option v-if="!policyProvider" value="" disabled>{{ t(`${prefix}.providerPlaceholder`) }}</option>
                     <option v-for="p in providerOptions" :key="p" :value="p">{{ t(`admin.connectionHealth.providerLabels.${p}`) }}</option>
-                  </select>
+                  </Select>
                   <p v-if="providerMismatch" class="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-xs text-amber-700 dark:text-amber-400">
                     {{ t(`${prefix}.providerMismatchWarning`) }}
                   </p>

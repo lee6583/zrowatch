@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +15,7 @@ import (
 	"transithub/backend/internal/config"
 	"transithub/backend/internal/modules/admin_accounts"
 	"transithub/backend/internal/modules/auth"
+	"transithub/backend/internal/modules/balance_control"
 	"transithub/backend/internal/modules/connection_health"
 	"transithub/backend/internal/modules/dashboard"
 	"transithub/backend/internal/modules/group_rate_campaigns"
@@ -93,6 +93,15 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	}
 	my_sites.RegisterRoutes(server.mux, mySitesService)
 	mySitesService.SetAdminAccountResolver(adminAccountsService)
+	balanceControlService := balance_control.NewService(
+		balance_control.NewRepository(db),
+		upstreamService,
+		mySitesService,
+		platformService,
+	)
+	if err := balanceControlService.EnsureSchema(context.Background()); err != nil {
+		panic(err)
+	}
 
 	// 工单模块：iframe 嵌入配置 + 工单/回复。公开 iframe 接口鉴权完全依赖 embedToken/Sub2API
 	// token 换取的 embed session，与 TransitHub 登录态无关，因此不加入 protectedPath（见下方）。
@@ -222,6 +231,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		panic(err)
 	}
 	connHealthService.SetAdminAccountResolver(adminAccountsService)
+	connHealthService.SetBalancePauseLookup(balanceControlService)
 	// 注入平台中性的分组/账号读取能力：admin 分组健康主列表用它拉取 admin 全量分组及
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
 	connHealthService.SetPlatformGroupReader(platformService)
@@ -261,12 +271,16 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 
 	// 站点同步成功后检查余额预警和倍率变更，按配置发送通知。
 	upstreamService.AfterSync = func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
-		strategy, err := settingsService.GetFirstStrategy(ctx)
+		// Account-name synchronization is independent of notification settings;
+		// a notification configuration failure must not prevent the remote rename.
+		renameResults := mySitesService.SyncSub2APIAccountNamesAfterRateChanges(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+		strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
 		if err != nil {
+			log.Printf("[alert] 加载工作区通知策略失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 			return
 		}
-		checkBalanceWarning(ctx, settingsService, upstreamService, strategy, userID, siteID, siteName, oldMetrics, newMetrics)
-		checkMultiplierChanges(ctx, settingsService, strategy, userID, siteID, siteName, oldMetrics, newMetrics)
+		checkBalanceWarning(ctx, settingsService, balanceControlService, strategy, userID, adminAccountID, siteID, siteName, newMetrics)
+		checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, renameResults)
 		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
 		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 	}
@@ -542,71 +556,28 @@ func makeAllowedOrigins(origins []string) map[string]struct{} {
 	return allowed
 }
 
-// balanceAlertTracker 记录每个站点最后一次余额预警发送时间，防止在冷却期内重复通知。
-// 冷却期内余额持续低于阈值时不再重复发送；冷却期过后若仍低于阈值则再次通知。
-// 余额恢复到阈值以上时自动清除记录，下次跌破可立即触发。
-var balanceAlertTracker = struct {
-	mu       sync.Mutex
-	lastSent map[string]time.Time
-}{lastSent: make(map[string]time.Time)}
-
-// balanceAlertCooldown 余额预警冷却时间，同一站点在此时间段内不会重复发送通知。
-const balanceAlertCooldown = 1 * time.Hour
-
-// checkBalanceWarning 检测余额是否低于阈值并发送通知。
-// 采用冷却机制：首次低于阈值立即通知，之后在冷却期内不再重复；冷却期过后若仍低于阈值再次通知。
-// 优先使用站点级 BalanceThreshold 覆盖全局 DefaultBalanceThreshold；站点设置为 nil 时降级到全局。
-func checkBalanceWarning(ctx context.Context, svc *settings.Service, uSvc *upstream.Service, strategy settings.StrategySettings, userID, siteID, siteName string, _ /* oldMetrics */, newMetrics upstream.Metrics) {
-	if !strategy.EnableBalanceWarning || len(strategy.BalanceNotifyBotIDs) == 0 {
-		return
-	}
-	if newMetrics.Balance.Value == nil {
-		return
+// checkBalanceWarning evaluates the durable balance guard. Robot selection only
+// controls notification delivery; the safety action still runs when no bot is
+// configured.
+func checkBalanceWarning(ctx context.Context, svc *settings.Service, guard *balance_control.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, newMetrics upstream.Metrics) balance_control.Result {
+	result := guard.Reconcile(ctx, userID, adminAccountID, siteID, siteName, strategy, newMetrics)
+	if !result.Known || result.Transition == "" {
+		return result
 	}
 
-	// 获取站点充值倍率，用于将 USD 余额转换为 CNY 后与阈值比较。
-	site, err := uSvc.GetSite(ctx, siteID)
-	if err != nil {
-		return
+	message := formatBalanceLifecycle(siteName, result, strategy.BalanceTemplate)
+	if len(strategy.BalanceNotifyBotIDs) == 0 {
+		log.Printf("[alert] 余额状态变更但未配置机器人 site=%s transition=%s", siteID, result.Transition)
+		return result
 	}
-	rechargeRate := site.RechargeRate
-	if rechargeRate <= 0 {
-		rechargeRate = 1
-	}
-
-	newBalCNY := *newMetrics.Balance.Value * rechargeRate
-
-	// 站点级阈值覆盖：有值则用站点配置，否则使用全局默认（均为 CNY）。
-	threshold := strategy.DefaultBalanceThreshold
-	if site.Settings.BalanceThreshold != nil {
-		threshold = *site.Settings.BalanceThreshold
-	}
-
-	if newBalCNY >= threshold {
-		// 余额恢复到阈值以上，清除冷却记录，下次跌破可立即触发。
-		balanceAlertTracker.mu.Lock()
-		delete(balanceAlertTracker.lastSent, siteID)
-		balanceAlertTracker.mu.Unlock()
-		return
-	}
-
-	// 冷却期检查：同一站点在冷却期内不重复通知。
-	balanceAlertTracker.mu.Lock()
-	if last, ok := balanceAlertTracker.lastSent[siteID]; ok && time.Since(last) < balanceAlertCooldown {
-		balanceAlertTracker.mu.Unlock()
-		return
-	}
-	balanceAlertTracker.lastSent[siteID] = time.Now()
-	balanceAlertTracker.mu.Unlock()
-
-	msg := formatBalanceWarning(siteName, newBalCNY, threshold, strategy.BalanceTemplate)
-	log.Printf("[alert] 余额预警触发 site=%s balanceCNY=%.2f threshold=%.2f rechargeRate=%.2f", siteName, newBalCNY, threshold, rechargeRate)
-	svc.SendToBots(ctx, userID, strategy.BalanceNotifyBotIDs, msg)
+	log.Printf("[alert] 余额状态变更 site=%s transition=%s balanceCNY=%.2f threshold=%.2f paused=%d restored=%d failed=%d", siteName, result.Transition, result.BalanceCNY, result.Threshold, len(result.Paused), len(result.Restored), len(result.Failed))
+	svc.SendToBotsForWorkspace(ctx, userID, adminAccountID, strategy.BalanceNotifyBotIDs, message)
+	return result
 }
 
 // checkMultiplierChanges 对比同步前后的分组倍率，任何变化都发送通知。
-// 只受系统设置全局开关 strategy.EnableMultiplierAlert 控制。
-func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) {
+// 使用发生同步的工作区策略，由 strategy.EnableMultiplierAlert 控制。
+func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, renameResults []my_sites.AccountRenameResult) {
 	_ = siteID
 	if !strategy.EnableMultiplierAlert || len(strategy.MultiplierNotifyBotIDs) == 0 {
 		return
@@ -630,9 +601,35 @@ func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy
 			continue
 		}
 		msg := formatMultiplierChange(siteName, g.Name, oldVal, *g.Multiplier, strategy.MultiplierTemplate)
+		msg += formatAccountRenameSummary(g.Name, renameResults)
 		log.Printf("[alert] 倍率变更触发 site=%s group=%s old=%.4f new=%.4f", siteName, g.Name, oldVal, *g.Multiplier)
-		svc.SendToBots(ctx, userID, strategy.MultiplierNotifyBotIDs, msg)
+		svc.SendToBotsForWorkspace(ctx, userID, adminAccountID, strategy.MultiplierNotifyBotIDs, msg)
 	}
+}
+
+func formatAccountRenameSummary(groupName string, results []my_sites.AccountRenameResult) string {
+	parts := make([]string, 0)
+	for _, result := range results {
+		if result.GroupName != groupName {
+			continue
+		}
+		switch result.Status {
+		case "updated":
+			parts = append(parts, fmt.Sprintf("账户名称已同步[%s]：%s -> %s", result.AccountID, result.OldName, result.NewName))
+		case "unchanged":
+			parts = append(parts, "账户名称无需修改")
+		case "skipped":
+			parts = append(parts, "账户名称格式无法识别，已跳过改名")
+		case "missing":
+			parts = append(parts, "未找到已绑定的 Sub2API 账户")
+		case "failed":
+			parts = append(parts, "账户名称同步失败")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "（改名结果：" + strings.Join(parts, "；") + "）"
 }
 
 const defaultBalanceTemplate = "【余额预警】{siteName} 站点余额（CNY）已不足 {threshold} 元，当前余额为 {balance} 元。"
@@ -649,6 +646,45 @@ func formatBalanceWarning(siteName string, balance, threshold float64, customTem
 		"{threshold}", fmt.Sprintf("%.2f", threshold),
 	)
 	return r.Replace(tpl)
+}
+
+func formatBalanceLifecycle(siteName string, result balance_control.Result, customTemplate string) string {
+	if result.Transition == "paused" {
+		message := formatBalanceWarning(siteName, result.BalanceCNY, result.Threshold, customTemplate)
+		message += fmt.Sprintf("已自动关闭站点调用；账户处理：成功 %d，跳过 %d，失败 %d", len(result.Paused), len(result.Skipped), len(result.Failed))
+		message += formatBalanceAccountSummary(result.Paused, result.Skipped, result.Failed)
+		return message
+	}
+	message := fmt.Sprintf("【余额恢复】%s 站点余额已恢复至 %.2f CNY（阈值 %.2f）；账户恢复：成功 %d，失败 %d，待重试 %d", siteName, result.BalanceCNY, result.Threshold, len(result.Restored), len(result.Failed), result.PendingRestores)
+	message += formatBalanceAccountSummary(result.Restored, result.Skipped, result.Failed)
+	return message
+}
+
+func formatBalanceAccountSummary(groups ...[]balance_control.AccountAction) string {
+	items := make([]string, 0)
+	for _, actions := range groups {
+		for _, action := range actions {
+			name := strings.TrimSpace(action.Name)
+			id := strings.TrimSpace(action.AccountID)
+			if name == "" && id == "" {
+				continue
+			}
+			label := name
+			if label == "" {
+				label = id
+			} else if id != "" {
+				label += "(" + id + ")"
+			}
+			if action.Status != "" {
+				label += ":" + action.Status
+			}
+			items = append(items, label)
+		}
+	}
+	if len(items) == 0 {
+		return ""
+	}
+	return "；账户明细：" + strings.Join(items, "，")
 }
 
 func formatMultiplierChange(siteName, groupName string, oldRate, newRate float64, customTemplate string) string {

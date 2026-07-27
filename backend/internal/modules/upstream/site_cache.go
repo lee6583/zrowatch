@@ -44,60 +44,72 @@ func NewRedisSiteCache(client *redis.Client) *RedisSiteCache {
 // 嵌入 Site 后通过额外字段覆盖 json:"-" 标记的 UserID 和 Session，
 // 确保这些关键字段不会在序列化时丢失。
 type sitePayload struct {
-	ID                string   `json:"id"`
-	UserID            string   `json:"userId"`
-	AdminAccountID    string   `json:"adminAccountId"`
-	Name              string   `json:"name"`
-	BaseURL           string   `json:"baseUrl"`
-	Platform          Platform `json:"platform"`
-	RequestedPlatform Platform `json:"requestedPlatform"`
-	Account           string   `json:"account"`
-	Remark            string   `json:"remark"`
-	RechargeRate      float64  `json:"rechargeRate"`
-	Status            Status   `json:"status"`
-	ErrorKey          *string  `json:"errorKey"`
-	Metrics           Metrics  `json:"metrics"`
-	LastSyncedAt      *int64   `json:"lastSyncedAt"`
-	Session           *Session `json:"session,omitempty"`
+	ID                 string       `json:"id"`
+	UserID             string       `json:"userId"`
+	AdminAccountID     string       `json:"adminAccountId"`
+	Name               string       `json:"name"`
+	BaseURL            string       `json:"baseUrl"`
+	Platform           Platform     `json:"platform"`
+	RequestedPlatform  Platform     `json:"requestedPlatform"`
+	Account            string       `json:"account"`
+	Remark             string       `json:"remark"`
+	RechargeRate       float64      `json:"rechargeRate"`
+	Status             Status       `json:"status"`
+	BalanceSuspended   bool         `json:"balanceSuspended"`
+	BalanceSuspendedAt *int64       `json:"balanceSuspendedAt,omitempty"`
+	BalancePauseReason string       `json:"balancePauseReason,omitempty"`
+	ErrorKey           *string      `json:"errorKey"`
+	Metrics            Metrics      `json:"metrics"`
+	Settings           SiteSettings `json:"settings"`
+	LastSyncedAt       *int64       `json:"lastSyncedAt"`
+	Session            *Session     `json:"session,omitempty"`
 }
 
 func toPayload(site *Site) sitePayload {
 	return sitePayload{
-		ID:                site.ID,
-		UserID:            site.UserID,
-		AdminAccountID:    site.AdminAccountID,
-		Name:              site.Name,
-		BaseURL:           site.BaseURL,
-		Platform:          site.Platform,
-		RequestedPlatform: site.RequestedPlatform,
-		Account:           site.Account,
-		Remark:            site.Remark,
-		RechargeRate:      site.RechargeRate,
-		Status:            site.Status,
-		ErrorKey:          site.ErrorKey,
-		Metrics:           site.Metrics,
-		LastSyncedAt:      site.LastSyncedAt,
-		Session:           site.Session,
+		ID:                 site.ID,
+		UserID:             site.UserID,
+		AdminAccountID:     site.AdminAccountID,
+		Name:               site.Name,
+		BaseURL:            site.BaseURL,
+		Platform:           site.Platform,
+		RequestedPlatform:  site.RequestedPlatform,
+		Account:            site.Account,
+		Remark:             site.Remark,
+		RechargeRate:       site.RechargeRate,
+		Status:             site.Status,
+		BalanceSuspended:   site.BalanceSuspended,
+		BalanceSuspendedAt: site.BalanceSuspendedAt,
+		BalancePauseReason: site.BalancePauseReason,
+		ErrorKey:           site.ErrorKey,
+		Metrics:            site.Metrics,
+		Settings:           site.Settings,
+		LastSyncedAt:       site.LastSyncedAt,
+		Session:            site.Session,
 	}
 }
 
 func fromPayload(p sitePayload) *Site {
 	return &Site{
-		ID:                p.ID,
-		UserID:            p.UserID,
-		AdminAccountID:    p.AdminAccountID,
-		Name:              p.Name,
-		BaseURL:           p.BaseURL,
-		Platform:          p.Platform,
-		RequestedPlatform: p.RequestedPlatform,
-		Account:           p.Account,
-		Remark:            p.Remark,
-		RechargeRate:      p.RechargeRate,
-		Status:            p.Status,
-		ErrorKey:          p.ErrorKey,
-		Metrics:           p.Metrics,
-		LastSyncedAt:      p.LastSyncedAt,
-		Session:           p.Session,
+		ID:                 p.ID,
+		UserID:             p.UserID,
+		AdminAccountID:     p.AdminAccountID,
+		Name:               p.Name,
+		BaseURL:            p.BaseURL,
+		Platform:           p.Platform,
+		RequestedPlatform:  p.RequestedPlatform,
+		Account:            p.Account,
+		Remark:             p.Remark,
+		RechargeRate:       p.RechargeRate,
+		Status:             p.Status,
+		BalanceSuspended:   p.BalanceSuspended,
+		BalanceSuspendedAt: p.BalanceSuspendedAt,
+		BalancePauseReason: p.BalancePauseReason,
+		ErrorKey:           p.ErrorKey,
+		Metrics:            p.Metrics,
+		Settings:           p.Settings,
+		LastSyncedAt:       p.LastSyncedAt,
+		Session:            p.Session,
 	}
 }
 

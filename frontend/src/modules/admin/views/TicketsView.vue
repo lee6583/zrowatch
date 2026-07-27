@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertCircle, Inbox, Loader2, RefreshCw, Settings2 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/select'
 import { useTickets } from '../composables/useTickets'
 import TicketDetailDrawer from '../components/tickets/TicketDetailDrawer.vue'
 import TicketEmbedConfigModal from '../components/tickets/TicketEmbedConfigModal.vue'
@@ -99,21 +100,12 @@ const canGoNext = () => page.value < totalPages.value && !isLoading.value
     <div class="flex flex-col space-y-4">
       <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
         <div class="flex items-center gap-3 w-full sm:w-auto flex-1">
-          <div class="relative w-full sm:w-48">
-            <select
-              :value="statusFilter"
-              class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none appearance-none transition-all focus:border-primary focus:ring-1 focus:ring-primary"
-              @change="handleStatusChange"
-            >
-              <option value="">{{ t('admin.tickets.tabs.all') }}</option>
-              <option v-for="status in statusOptions" :key="status" :value="status">
-                {{ t(`admin.tickets.status.${status}`) }}
-              </option>
-            </select>
-            <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-muted-foreground">
-              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-            </div>
-          </div>
+          <Select :value="statusFilter" class="w-full sm:w-48" @change="handleStatusChange">
+            <option value="">{{ t('admin.tickets.tabs.all') }}</option>
+            <option v-for="status in statusOptions" :key="status" :value="status">
+              {{ t(`admin.tickets.status.${status}`) }}
+            </option>
+          </Select>
         </div>
 
         <div class="flex items-center gap-2 shrink-0">

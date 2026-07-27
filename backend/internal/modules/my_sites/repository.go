@@ -439,6 +439,15 @@ func (r *Repository) GetRealConnection(ctx context.Context, id string, userID st
 	return conn, nil
 }
 
+func (r *Repository) UpdateRealConnectionAdminAccountName(ctx context.Context, id string, userID string, adminAccountID string, name string) error {
+	_, err := r.db.Exec(ctx, `
+		UPDATE real_connections
+		SET admin_account_name = $1
+		WHERE id = $2 AND user_id = $3 AND workspace_admin_account_id = $4
+	`, name, id, userID, adminAccountID)
+	return err
+}
+
 // GetRealConnectionByOperationID supports retry-safe connect requests. The
 // partial unique index guarantees at most one non-empty operation ID per workspace.
 func (r *Repository) GetRealConnectionByOperationID(ctx context.Context, userID string, adminAccountID string, operationID string) (*RealConnection, error) {
@@ -511,6 +520,119 @@ func (r *Repository) DeleteRealConnectionWithPricingMapping(ctx context.Context,
 	}
 	if commandTag.RowsAffected() == 0 {
 		return fmt.Errorf("delete real connection: no rows affected")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+// PartialDisconnectRealConnection removes selected downstream groups while
+// retaining the connection row and its remote account/key.
+func (r *Repository) PartialDisconnectRealConnection(ctx context.Context, conn RealConnection, remainingGroupIDs, remainingGroupNames, removedGroupNames []string, removePricingMapping bool) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	if removePricingMapping && conn.PricingMappingEnabled {
+		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		if err != nil {
+			return err
+		}
+		if state != nil {
+			for _, name := range removedGroupNames {
+				var shared bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM real_connections WHERE user_id = $1 AND workspace_admin_account_id = $2 AND id <> $3 AND pricing_mapping_enabled AND upstream_site_id = $4 AND upstream_group_name = $5 AND own_group_names ? $6)`, conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, conn.UpstreamSiteID, conn.UpstreamGroupName, name).Scan(&shared); err != nil {
+					return err
+				}
+				if !shared {
+					removeMappingTargetForOwnGroups(state, []string{name}, UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName})
+				}
+			}
+			if err := updateStateInTx(ctx, tx, *state); err != nil {
+				return err
+			}
+		}
+	}
+	idsJSON, err := json.Marshal(remainingGroupIDs)
+	if err != nil {
+		return err
+	}
+	namesJSON, err := json.Marshal(remainingGroupNames)
+	if err != nil {
+		return err
+	}
+	commandTag, err := tx.Exec(ctx, `UPDATE real_connections SET own_group_ids = $1::jsonb, own_group_names = $2::jsonb WHERE id = $3 AND user_id = $4 AND workspace_admin_account_id = $5`, string(idsJSON), string(namesJSON), conn.ID, conn.UserID, conn.WorkspaceAdminAccountID)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return fmt.Errorf("partial disconnect: no rows affected")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	committed = true
+	return nil
+}
+
+func (r *Repository) UpdateRealConnectionGroups(ctx context.Context, conn RealConnection, groupIDs, groupNames, addedGroupNames, removedGroupNames []string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback(ctx)
+		}
+	}()
+
+	if conn.PricingMappingEnabled {
+		state, err := scanState(tx.QueryRow(ctx, `SELECT user_id, admin_account_id, base_url, email, session, mappings, own_groups FROM my_site_states WHERE user_id = $1 AND admin_account_id = $2 FOR UPDATE`, conn.UserID, conn.WorkspaceAdminAccountID))
+		if err != nil {
+			return err
+		}
+		if state != nil {
+			target := UpstreamGroupRef{SiteID: conn.UpstreamSiteID, GroupName: conn.UpstreamGroupName}
+			addMappingTargetForOwnGroups(state, addedGroupNames, target)
+			for _, name := range removedGroupNames {
+				var shared bool
+				if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM real_connections WHERE user_id = $1 AND workspace_admin_account_id = $2 AND id <> $3 AND pricing_mapping_enabled AND upstream_site_id = $4 AND upstream_group_name = $5 AND own_group_names ? $6)`, conn.UserID, conn.WorkspaceAdminAccountID, conn.ID, conn.UpstreamSiteID, conn.UpstreamGroupName, name).Scan(&shared); err != nil {
+					return err
+				}
+				if !shared {
+					removeMappingTargetForOwnGroups(state, []string{name}, target)
+				}
+			}
+			if err := updateStateInTx(ctx, tx, *state); err != nil {
+				return err
+			}
+		}
+	}
+
+	idsJSON, err := json.Marshal(groupIDs)
+	if err != nil {
+		return err
+	}
+	namesJSON, err := json.Marshal(groupNames)
+	if err != nil {
+		return err
+	}
+	commandTag, err := tx.Exec(ctx, `UPDATE real_connections SET own_group_ids = $1::jsonb, own_group_names = $2::jsonb WHERE id = $3 AND user_id = $4 AND workspace_admin_account_id = $5`, string(idsJSON), string(namesJSON), conn.ID, conn.UserID, conn.WorkspaceAdminAccountID)
+	if err != nil {
+		return err
+	}
+	if commandTag.RowsAffected() == 0 {
+		return fmt.Errorf("update real connection groups: no rows affected")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err

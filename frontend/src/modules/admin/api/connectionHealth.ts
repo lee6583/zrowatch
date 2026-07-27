@@ -2,15 +2,22 @@ import type {
   AdminGroupPolicyConfiguration,
   AdminGroupPolicyConfigurationInput,
   AdminGroupHealth,
+  BoundDispatchAccountState,
   ConnectionHealthEvent,
   ConnectionHealthOverview,
   ConnectionHealthStoredSummary,
   ConnectionHealthPolicy,
+  GroupRateManualProbeInput,
+  GroupRateManualProbeResponse,
+  GroupRateMonitorSettings,
+  GroupRateMonitorSettingsInput,
+  GroupRateMonitorSummary,
   ManualProbeModelOption,
   ManualProbeResult,
   ModelHealth,
   OwnGroupHealth,
   PolicyInput,
+  TargetDispatchState,
   TargetPolicyAssignments,
 } from '../types/connectionHealth'
 import {
@@ -78,6 +85,27 @@ export const getConnectionHealthGroups = async (): Promise<OwnGroupHealth[]> =>
 export const getConnectionHealthAdminGroups = async (): Promise<AdminGroupHealth[]> =>
   requestJson<AdminGroupHealth[]>('/connection-health/admin-groups')
 
+export const getBoundDispatchAccounts = async (): Promise<BoundDispatchAccountState[]> =>
+  requestJson<BoundDispatchAccountState[]>('/connection-health/bound-dispatch-accounts')
+
+export const getGroupRateMonitorSettings = async (): Promise<GroupRateMonitorSettings> =>
+  requestJson<GroupRateMonitorSettings>('/connection-health/group-rate-monitor/settings')
+
+export const saveGroupRateMonitorSettings = async (input: GroupRateMonitorSettingsInput): Promise<GroupRateMonitorSettings> =>
+  requestJson<GroupRateMonitorSettings>('/connection-health/group-rate-monitor/settings', {
+    method: 'PUT',
+    body: JSON.stringify(input),
+  })
+
+export const getGroupRateMonitorSummaries = async (): Promise<GroupRateMonitorSummary[]> =>
+  requestJson<GroupRateMonitorSummary[]>('/connection-health/group-rate-monitor/summaries')
+
+export const probeGroupRateMonitor = async (input: GroupRateManualProbeInput): Promise<GroupRateManualProbeResponse> =>
+  requestJson<GroupRateManualProbeResponse>('/connection-health/group-rate-monitor/probe', {
+    method: 'POST',
+    body: JSON.stringify(input),
+  })
+
 export const getConnectionHealthEvents = async (connectionId?: string, limit = 100): Promise<ConnectionHealthEvent[]> => {
   const params = new URLSearchParams()
   if (connectionId) params.set('connectionId', connectionId)
@@ -124,6 +152,18 @@ export const setTargetPolicyAssignments = async (targetId: string, policyIds: st
   requestJson<TargetPolicyAssignments>(`/connection-health/targets/${encodeURIComponent(targetId)}/policy-assignments`, {
     method: 'PUT',
     body: JSON.stringify({ policyIds }),
+  })
+
+export const updateTargetScheduling = async (targetId: string, schedulable: boolean): Promise<{ ok: boolean; schedulable: boolean }> =>
+  requestJson<{ ok: boolean; schedulable: boolean }>(`/connection-health/targets/${encodeURIComponent(targetId)}/scheduling`, {
+    method: 'PUT',
+    body: JSON.stringify({ schedulable }),
+  })
+
+export const updateTargetDispatch = async (targetId: string, enabled: boolean): Promise<TargetDispatchState> =>
+  requestJson<TargetDispatchState>(`/connection-health/targets/${encodeURIComponent(targetId)}/dispatch`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
   })
 
 export const getAdminGroupPolicyConfiguration = async (adminGroupId: string): Promise<AdminGroupPolicyConfiguration> =>

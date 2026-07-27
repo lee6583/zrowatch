@@ -48,6 +48,45 @@ func (s *PlatformService) ListAdminGroupAccounts(session Session, group AdminGro
 	}
 }
 
+// ListSub2APIAdminAccounts lists all Sub2API admin forwarding accounts. It is
+// used only for safe compatibility matching of legacy bindings that predate
+// real_connections account IDs.
+func (s *PlatformService) ListSub2APIAdminAccounts(session Session) ([]AdminGroupAccountInfo, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return nil, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	authOptions := adminAuthOptions(session)
+	const pageSize = 100
+	const maxPages = 100
+	accounts := make([]AdminGroupAccountInfo, 0)
+	for page := 1; page <= maxPages; page++ {
+		pageURL := session.BaseURL + "/api/v1/admin/accounts?page=" + strconvInt(int64(page)) +
+			"&page_size=" + strconvInt(pageSize)
+		response, err := s.httpClient.requestJSON(pageURL, authOptions)
+		if err != nil {
+			return nil, err
+		}
+		items := dataArray(response.Payload)
+		if len(items) == 0 {
+			break
+		}
+		for _, item := range items {
+			record, ok := item.(map[string]any)
+			if ok {
+				accounts = append(accounts, parseSub2APIAccount(record))
+			}
+		}
+		total, hasTotal := paginationTotal(response.Payload)
+		if hasTotal && page*pageSize >= total {
+			break
+		}
+		if !hasTotal && len(items) < pageSize {
+			break
+		}
+	}
+	return accounts, nil
+}
+
 // listSub2APIGroupAccounts 分页拉取 sub2api 某分组下的账号。
 // 注意 query 参数是 group=<分组ID>（不是 group_id）。逐页拉取直到没有下一页或达到 total。
 func (s *PlatformService) listSub2APIGroupAccounts(session Session, group AdminGroupInfo) ([]AdminGroupAccountInfo, error) {

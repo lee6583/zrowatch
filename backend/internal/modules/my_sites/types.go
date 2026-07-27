@@ -7,13 +7,14 @@ import (
 )
 
 const (
-	ErrorAuthRequired           = "admin.mySites.errors.authRequired"
-	ErrorAdminOnly              = "admin.mySites.errors.adminOnly"
-	ErrorRequest                = "admin.mySites.errors.request"
-	ErrorUnknown                = "admin.mySites.errors.unknown"
-	ErrorInvalidAutoPricingConf = "admin.mySites.errors.invalidAutoPricingConfig"
-	ErrorConnectionExists       = "admin.mySites.errors.connectionExists"
-	ErrorManagedDeleteOnly      = "admin.mySites.errors.managedDeleteOnly"
+	ErrorAuthRequired                 = "admin.mySites.errors.authRequired"
+	ErrorAdminOnly                    = "admin.mySites.errors.adminOnly"
+	ErrorRequest                      = "admin.mySites.errors.request"
+	ErrorUnknown                      = "admin.mySites.errors.unknown"
+	ErrorInvalidAutoPricingConf       = "admin.mySites.errors.invalidAutoPricingConfig"
+	ErrorConnectionExists             = "admin.mySites.errors.connectionExists"
+	ErrorManagedDeleteOnly            = "admin.mySites.errors.managedDeleteOnly"
+	ErrorPartialDisconnectUnsupported = "admin.mySites.errors.partialDisconnectUnsupported"
 )
 
 const (
@@ -175,9 +176,14 @@ type RealConnectRequest struct {
 // RealDisconnectRequest 取消真实对接请求体。
 // Mode: "unlink" 仅删除本地绑定记录，"full" 同时删除上游 Key 和 admin 转发账号。
 type RealDisconnectRequest struct {
-	ConnectionID         string `json:"connectionId"`
-	Mode                 string `json:"mode"`
-	RemovePricingMapping *bool  `json:"removePricingMapping"`
+	ConnectionID         string   `json:"connectionId"`
+	Mode                 string   `json:"mode"`
+	RemovePricingMapping *bool    `json:"removePricingMapping"`
+	OwnGroupIDs          []string `json:"ownGroupIds"`
+}
+
+type UpdateRealConnectionGroupsRequest struct {
+	OwnGroupIDs []string `json:"ownGroupIds"`
 }
 
 // RealBindRequest 手动绑定请求体。

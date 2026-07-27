@@ -154,6 +154,101 @@ export interface AdminGroupHealth {
   accounts: AdminGroupAccount[]
 }
 
+export interface TargetDispatchState {
+  status: string
+  schedulable: boolean
+}
+
+export interface BoundDispatchAccountState {
+  id: string
+  name: string
+  status: string
+  schedulable?: boolean
+  targetId: string
+  available: boolean
+  unavailableReason?: 'not_found' | 'invalid_state' | 'unavailable' | string
+  actionResult?: string
+}
+
+export type GroupRateProbeStatus = 'healthy' | 'warning' | 'unhealthy' | 'unavailable' | 'unconfigured'
+
+export interface GroupRateProbeTargetResult {
+  targetId: string
+  accountId: string
+  accountName: string
+  model: string
+  result: string
+  healthy: boolean
+  available: boolean
+  consecutiveFailures: number
+  latencyMs: number | null
+  errorKey?: string
+  errorDetail?: string
+  unavailableReason?: string
+  remoteAction?: string
+  status?: string
+  schedulable?: boolean
+}
+
+export interface GroupRateProbeCycle {
+  id: string
+  upstreamSiteId: string
+  upstreamGroupId: string
+  upstreamGroupName: string
+  trigger: 'scheduled' | 'manual' | string
+  status: GroupRateProbeStatus
+  model: string
+  targetCount: number
+  successCount: number
+  details: GroupRateProbeTargetResult[]
+  createdAt: string
+}
+
+export interface GroupRateMonitorSummary {
+  upstreamSiteId: string
+  upstreamGroupId: string
+  upstreamGroupName: string
+  enabled: boolean
+  model: string
+  status: GroupRateProbeStatus
+  stale: boolean
+  successRate: number
+  latestProbeAt: string | null
+  events: GroupRateProbeCycle[]
+}
+
+export interface GroupRateMonitorRestoreSummary {
+  restored: number
+  pending: number
+  conflict: number
+}
+
+export interface GroupRateMonitorSettings {
+  enabled: boolean
+  probeIntervalSeconds: number
+  failureThreshold: number
+  defaultModel: string
+  restore: GroupRateMonitorRestoreSummary
+}
+
+export interface GroupRateMonitorSettingsInput {
+  enabled: boolean
+  probeIntervalSeconds: number
+  failureThreshold: number
+  defaultModel: string
+}
+
+export interface GroupRateManualProbeInput {
+  upstreamSiteId: string
+  upstreamGroupId: string
+  upstreamGroupName: string
+}
+
+export interface GroupRateManualProbeResponse {
+  summary: GroupRateMonitorSummary
+  dispatchAccounts: BoundDispatchAccountState[]
+}
+
 export interface ConnectionHealthEvent {
   id: string
   connectionId: string

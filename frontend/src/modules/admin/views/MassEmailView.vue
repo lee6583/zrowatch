@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertCircle, Ban, CheckCircle2, ChevronDown, ChevronUp, Eye, FileText, History, Loader2, Mail, RefreshCw, Search, Send, Trash2, X } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
+import { Select } from '@/components/ui/select'
 import { getEmailTemplates } from '../api/settings'
 import {
   cancelMassEmailBatch,
@@ -527,21 +528,21 @@ onBeforeUnmount(() => {
           </form>
           <label class="space-y-1 text-sm font-medium text-foreground">
             <span>{{ t('admin.massEmail.filters.status') }}</span>
-            <select v-model="statusFilter" class="h-10 w-full rounded-lg border border-border/60 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary" @change="setFilters">
+            <Select v-model="statusFilter" class="h-10" @change="setFilters">
               <option value="">{{ t('admin.massEmail.filters.allStatuses') }}</option>
               <option v-for="status in statusOptions" :key="status" :value="status">
                 {{ t(`admin.massEmail.userStatus.${status}`) }}
               </option>
-            </select>
+            </Select>
           </label>
           <label class="space-y-1 text-sm font-medium text-foreground">
             <span>{{ t('admin.massEmail.filters.role') }}</span>
-            <select v-model="roleFilter" class="h-10 w-full rounded-lg border border-border/60 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary" @change="setFilters">
+            <Select v-model="roleFilter" class="h-10" @change="setFilters">
               <option value="">{{ t('admin.massEmail.filters.allRoles') }}</option>
               <option v-for="role in roleOptions" :key="role" :value="role">
                 {{ t(`admin.massEmail.roles.${role}`) }}
               </option>
-            </select>
+            </Select>
           </label>
           <div class="flex flex-wrap items-end gap-2 sm:col-span-2 lg:col-span-1">
             <Button variant="secondary" class="h-10 rounded-lg px-3" :disabled="isLoadingUsers || isLoadingBatches" @click="refreshAll">
@@ -685,12 +686,12 @@ onBeforeUnmount(() => {
           </div>
           <label class="space-y-1 text-sm font-medium text-foreground">
             <span>{{ t('admin.massEmail.template.label') }}</span>
-            <select v-model="selectedTemplateId" class="h-10 w-full rounded-lg border border-border/60 bg-surface px-3 text-sm text-foreground outline-none focus:border-primary focus:ring-1 focus:ring-primary" :disabled="isLoadingTemplates">
+            <Select v-model="selectedTemplateId" class="h-10" :disabled="isLoadingTemplates">
               <option value="">{{ t('admin.massEmail.template.placeholder') }}</option>
               <option v-for="template in templates" :key="template.id" :value="template.id">
                 {{ template.name }}
               </option>
-            </select>
+            </Select>
           </label>
           <div class="rounded-lg border border-border/50 bg-surface p-3 text-sm text-muted-foreground">
             <span class="font-medium text-foreground">{{ selectedTemplate?.subject || t('admin.massEmail.template.noSubject') }}</span>

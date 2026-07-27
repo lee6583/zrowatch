@@ -281,6 +281,33 @@ func (s *Service) resolveManualTarget(ctx context.Context, userID string, target
 	return session, target, account, adminAccountID, nil
 }
 
+// resolveDispatchTarget validates only the stable target ID and current admin
+// session. The dispatch endpoint validates account existence through the
+// Sub2API detail GET, so it does not need the expensive full group scan used by
+// probe and policy-management paths.
+func (s *Service) resolveDispatchTarget(ctx context.Context, userID string, targetID string) (upstream.Session, string, string, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return upstream.Session{}, "", "", err
+	}
+	parsed, ok := parseTargetID(targetID)
+	if !ok || parsed.adminAccountID != adminAccountID {
+		return upstream.Session{}, "", "", requestError(ErrorProbeTargetNotFound)
+	}
+
+	session, err := s.mySites.RequireSession(ctx, userID, adminAccountID)
+	if err != nil {
+		return upstream.Session{}, "", "", err
+	}
+	if parsed.platform != string(session.Platform) {
+		return upstream.Session{}, "", "", requestError(ErrorProbeTargetNotFound)
+	}
+	if parsed.platform != string(upstream.PlatformSub2API) {
+		return upstream.Session{}, "", "", requestError(ErrorRequest)
+	}
+	return session, adminAccountID, parsed.accountID, nil
+}
+
 // ProbeTarget 手动探活一个独立目标：前端传 targetId + models（不再传 connectionId/base_url/key）。
 // 后端按当前 user/admin workspace 重新解析目标与凭据，不信任前端传入的任何上游地址或密钥。
 // 不可探活时返回结构化 requestError（credential_unavailable / secure_verification_required /

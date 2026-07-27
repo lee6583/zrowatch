@@ -1,7 +1,7 @@
 export default {
   brand: {
-    name: 'TransitHub',
-    logoAlt: 'TransitHub 徽标'
+    name: 'zrowatch',
+    logoAlt: 'zrowatch 徽标'
   },
   nav: {
     features: '核心特性',
@@ -48,7 +48,7 @@ export default {
     salesBtn: '联系销售'
   },
   footer: {
-    rights: 'TransitHub 运维团队。保留所有权利。'
+    rights: 'zrowatch 运维团队。保留所有权利。'
   },
   auth: {
     backToHome: '返回主页',
@@ -915,7 +915,14 @@ export default {
           strategy: '生效策略',
           priority: '上游优先级',
           multiplier: '有效倍率',
+          scheduling: '调度',
           actions: '操作'
+        },
+        scheduling: {
+          enable: '开启调度',
+          disable: '关闭调度',
+          enabled: '调度已开启',
+          disabled: '调度已关闭'
         },
         models: {
           empty: '该目标还没有模型探活结果。',
@@ -1283,6 +1290,7 @@ export default {
       },
       errors: {
         request: '操作失败，请稍后重试。',
+        balanceSuspended: '该账号所属站点余额不足，当前不能开启调度。',
         unknown: '暂时无法读取分组健康数据，请稍后重试。',
         network: '网络异常，请检查连接后重试。',
         notFound: '探活目标不存在或无权访问。',
@@ -1303,6 +1311,12 @@ export default {
     },
       upstream: {
         searchPlaceholder: '搜索站点名称...',
+        filters: {
+          allPlatforms: '全部平台',
+          platform: '平台筛选',
+          allConnectedGroupTypes: '全部已对接类型',
+          connectedGroupType: '已对接类型筛选'
+        },
         addSite: '新增站点',
         summary: '已连接 {connected} / {total} 个上游站点',
         refresh: {
@@ -1378,6 +1392,7 @@ export default {
         groupMultiplier: '分组倍率',
         availableGroups: '可用分组',
         viewAvailableGroups: '查看可用分组',
+        connectedGroups: '对接分组',
         closeGroupsModal: '关闭',
         dedicatedMultiplierBadge: '专属倍率',
         dedicatedMultiplierTooltip: '该用户命中了 sub2api 专属倍率，业务计算使用右侧倍率。',
@@ -1385,6 +1400,9 @@ export default {
         isConnected: '是否对接',
         connected: '已对接',
         disconnected: '未对接',
+        checkingConnections: '正在检查对接状态',
+        connectedGroupsPreview: '已对接分组：{groups}',
+        noConnectedGroups: '暂无已对接分组',
         lastUpdated: '更新时间',
         notSynced: '暂未同步'
       },
@@ -1392,6 +1410,7 @@ export default {
         connecting: '连接中',
         syncing: '同步中',
         connected: '已连接',
+        disabled: '已关闭',
         error: '异常'
       },
       empty: {
@@ -1467,14 +1486,103 @@ export default {
       fields: {
         siteName: '站点名称',
         groupName: '分组名称',
+        upstreamGroup: '上游分组',
+        downstreamGroup: '下游分组',
         type: '分组类型',
         platform: '站点平台',
         currentMultiplier: '当前倍率',
         effectiveMultiplier: '换算后成本倍率',
         multiplierFormula: '上游 {upstream} × 充值系数 {recharge}',
         delta: '涨跌幅',
+        health: '健康状态',
         updatedAt: '更新时间',
+        dispatch: '调度',
         actions: '操作'
+      },
+      dispatch: {
+        enableForRate: '开启 {site} · {group} 调度',
+        disableForRate: '停止 {site} · {group} 调度',
+        loading: '正在读取调度状态…',
+        updating: '正在更新调度状态…',
+        accountMissing: '远端账号已不存在，请重新对接后再操作。',
+        unavailable: '调度状态暂不可用，请刷新后重试。',
+        loadFailed: '调度状态加载失败，请刷新后重试。',
+        updateFailed: '调度状态更新失败，请稍后重试。'
+      },
+      health: {
+        noResult: '暂无探活结果',
+        status: {
+          healthy: '健康',
+          warning: '波动',
+          unhealthy: '异常',
+          unavailable: '不可用',
+          unconfigured: '未配置',
+          stale: '已过期'
+        },
+        trigger: {
+          manual: '手动探活',
+          scheduled: '自动探活'
+        },
+        tooltip: {
+          model: '模型：{model}',
+          upstreamGroup: '上游分组：{group}'
+        },
+        result: {
+          success: '成功',
+          failed: '失败',
+          network_fluctuation: '网络异常',
+          rate_limited: '请求限流',
+          server_error: '上游服务错误',
+          auth: '鉴权失败',
+          model_not_found: '模型不存在',
+          invalid_response: '响应格式异常',
+          unsupported: '暂不支持'
+        },
+        unavailable: {
+          unknown: '暂不可探活',
+          not_found: '远端账号不存在',
+          target_busy: '目标正在处理中',
+          state_unavailable: '状态保存失败',
+          credential_unavailable: '无法获取探活凭据',
+          secure_verification_required: '需要上游安全验证',
+          base_url_unavailable: '缺少 Base URL',
+          model_unavailable: '模型不可用',
+          export_unavailable: '账号导出接口不可用',
+          credentials_redacted: '账号凭据已脱敏'
+        },
+        probe: {
+          action: '立即探活',
+          disabled: '请先在探活设置中配置模型',
+          success: '探活成功',
+          warning: '探活失败，尚未达到关闭调度阈值',
+          failedAndDisabled: '探活失败，已关闭相关账户调度',
+          failedAction: '探活失败，但相关账户调度未能关闭',
+          failedWithoutControl: '探活失败；自动探活未启用，未调整账户调度',
+          unavailable: '暂时无法探活，请检查站点地址、API Key 和模型',
+          requestFailed: '探活请求失败，请稍后重试'
+        },
+        settings: {
+          action: '探活设置',
+          title: '探活设置',
+          description: '使用上游站点 URL 和该分组的 API Key 发起真实最小请求；连续失败后关闭其绑定的下游 Sub2API 账户。',
+          loading: '正在读取探活设置...',
+          enabled: '启用自动探活',
+          enabledHint: '启用后，当前和未来新增的已对接上游分组都会使用各自的 URL 与 API Key 自动探活。',
+          interval: '探活间隔（秒）',
+          failureThreshold: '连续失败阈值',
+          defaultModel: '默认模型',
+          modelPlaceholder: '例如 gpt-4o-mini',
+          save: '保存设置',
+          saved: '设置已保存。已恢复 {restored} 个账户，{pending} 个待重试，{conflict} 个保留人工状态。'
+        },
+        errors: {
+          modelRequired: '启用自动探活前必须填写默认模型。',
+          disabled: '尚未配置探活模型，请先完成探活设置。',
+          loadFailed: '健康状态加载失败，请稍后重试。',
+          settingsLoadFailed: '探活设置加载失败，请稍后重试。',
+          settingsSaveFailed: '探活设置保存失败，请稍后重试。',
+          probeFailed: '手动探活失败，请稍后重试。'
+        }
       },
       actions: {
         refresh: '刷新数据',
@@ -1488,6 +1596,7 @@ export default {
         closeConnect: '关闭对接窗口',
         saveConnect: '确认对接',
         cancel: '取消',
+        confirm: '确定',
         saveType: '保存类型'
       },
       filters: {
@@ -1600,11 +1709,24 @@ export default {
         unlinkOnlyHint: '仅删除本地绑定记录，保留上游 Key 和 Admin 账号',
         deleteAll: '删除账号和 Key',
         deleteAllHint: '同时删除上游 Key 和 Admin 站点的转发账号',
+        downstreamGroups: '选择下游分组',
+        downstreamGroupsHint: '仅处理勾选的下游分组，未勾选的绑定会保留',
+        selectTarget: '请至少选择一个下游分组',
+        noTargets: '没有找到可处理的下游分组',
         removePricingMapping: '同时移除调价数据源',
         removePricingMappingHint: '取消勾选可保留当前上游分组的调价映射。',
         confirm: '确定',
         disconnecting: '正在取消对接...',
         failed: '取消对接失败'
+      },
+      connectionEdit: {
+        action: '编辑下游分组',
+        title: '编辑 {site} · {group} 的下游分组',
+        description: '选择该上游分组可以调用的我的站点分组。',
+        ownGroupLabel: '我的站点分组',
+        empty: '没有可选择的站点分组',
+        loadFailed: '读取站点分组失败，请刷新后重试。',
+        failed: '更新下游分组失败'
       },
       format: {
         multiplier: '{value}x',
@@ -1751,9 +1873,12 @@ export default {
     },
     mySites: {
       errors: {
+        request: '请求参数或绑定数据不匹配，请刷新页面后重试。',
+        unknown: '取消对接失败，请稍后重试。',
         invalidAutoPricingConfig: '自动调价配置无效：主上游不在关联上游中，或最低倍率大于最高倍率。',
         connectionExists: '该上游分组已经存在真实连接。',
-        managedDeleteOnly: '已有资源关联只能取消本地关联，不能删除远端资源。'
+        managedDeleteOnly: '已有资源关联只能取消本地关联，不能删除远端资源。',
+        partialDisconnectUnsupported: '当前下游平台不支持只删除部分分组，请选择该账号的全部下游分组。'
       }
     },
     tickets: {

@@ -71,7 +71,7 @@ const hide = () => {
           role="tooltip"
           :class="[
             'fixed rounded-lg bg-zinc-900 shadow-lg text-xs text-white z-[9999] pointer-events-none',
-            wide ? 'w-64 whitespace-normal px-3 py-2 font-normal' : 'whitespace-nowrap px-2.5 py-1.5 font-medium'
+            wide ? 'w-64 whitespace-pre-line px-3 py-2 font-normal leading-relaxed' : 'whitespace-nowrap px-2.5 py-1.5 font-medium'
           ]"
           :style="{ left: `${pos.x}px`, top: `${pos.y}px` }"
         >

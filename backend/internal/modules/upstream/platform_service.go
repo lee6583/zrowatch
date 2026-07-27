@@ -2185,6 +2185,43 @@ func (s *PlatformService) UpdateNewAPIChannelWeightStatus(session Session, chann
 	return err
 }
 
+// UpdateNewAPIChannelGroupIDs updates only the channel's downstream group list
+// while preserving credentials, routing and scheduling fields from GET.
+func (s *PlatformService) UpdateNewAPIChannelGroupIDs(session Session, channelID string, groupIDs []string) error {
+	if session.Platform != PlatformNewAPI || strings.TrimSpace(channelID) == "" || len(groupIDs) == 0 {
+		return newRequestError(ErrorAuth, PlatformNewAPI)
+	}
+	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/channel/"+url.PathEscape(channelID), newAPIAuthOptions(session))
+	if err != nil {
+		return err
+	}
+	data := dataRecord(response.Payload)
+	if len(data) == 0 {
+		return newRequestError(ErrorInvalidResponse, PlatformNewAPI)
+	}
+	payload := map[string]any{"group": strings.Join(groupIDs, ",")}
+	for _, key := range []string{
+		"id", "type", "key", "name", "base_url", "models", "status", "weight", "priority",
+		"auto_ban", "model_mapping", "tag", "setting", "param_override", "header_override",
+	} {
+		if value, ok := data[key]; ok {
+			payload[key] = value
+		}
+	}
+	if _, ok := payload["id"]; !ok {
+		if idNumber, parseErr := strconv.ParseInt(channelID, 10, 64); parseErr == nil {
+			payload["id"] = idNumber
+		} else {
+			payload["id"] = channelID
+		}
+	}
+	options := newAPIAuthOptions(session)
+	options.Method = http.MethodPut
+	options.Body = payload
+	_, err = s.httpClient.requestJSON(session.BaseURL+"/api/channel/", options)
+	return err
+}
+
 // UpdateAdminTargetPriority 按当前 admin session 平台更新账号/渠道调度优先级。该入口供
 // connection_health 的倍率排序策略使用，平台差异和安全的 GET+PUT merge 都封装在 upstream
 // 模块内部，避免健康模块了解各上游请求体细节。
@@ -2249,7 +2286,7 @@ func (s *PlatformService) updateSub2APIAdminAccountPriority(session Session, acc
 	}
 	payload := map[string]any{"priority": priority}
 	for _, key := range []string{
-		"name", "notes", "type", "credentials", "extra", "proxy_id", "status",
+		"name", "notes", "type", "credentials", "extra", "proxy_id", "status", "schedulable",
 		"concurrency", "rate_multiplier", "load_factor", "expires_at", "auto_pause_on_expired",
 		"confirm_mixed_channel_risk",
 	} {
@@ -2277,16 +2314,256 @@ func (s *PlatformService) updateSub2APIAdminAccountPriority(session Session, acc
 // remote_action=unsupported 并停止后续动作，不做任何猜测性的 PUT 请求。
 // 明文 credentials 只是原样透传（从 GET 响应直接搬到 PUT 请求体），本方法不解析、不记录其内容。
 func (s *PlatformService) UpdateSub2APIAdminAccountStatus(session Session, accountID string, status string) error {
+	return s.UpdateSub2APIAdminAccountState(session, accountID, &status, nil)
+}
+
+// Sub2APIAdminAccountState contains the small amount of non-sensitive state
+// required by balance protection and the scheduling UI. The complete response
+// remains internal to PlatformService so credentials never cross module APIs.
+type Sub2APIAdminAccountState struct {
+	Name        string
+	Status      string
+	Schedulable *bool
+}
+
+// GetSub2APIAdminAccountState reads one forwarding account without exposing its
+// credentials to callers.
+func (s *PlatformService) GetSub2APIAdminAccountState(session Session, accountID string) (Sub2APIAdminAccountState, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	if strings.TrimSpace(accountID) == "" {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
+	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
+	if err != nil {
+		return Sub2APIAdminAccountState{}, err
+	}
+	data := dataRecord(response.Payload)
+	if len(data) == 0 {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return Sub2APIAdminAccountState{
+		Name:        safeString(data, "name"),
+		Status:      stringOrNumberField(data, []string{"status"}),
+		Schedulable: firstBoolValue(data, []string{"schedulable"}),
+	}, nil
+}
+
+// UpdateSub2APIAdminAccountState changes the requested account state while
+// preserving the rest of the remote account configuration. Sub2API persists
+// status through the account PUT endpoint, but schedulable has its own POST
+// endpoint and must not be treated as a regular account field.
+func (s *PlatformService) UpdateSub2APIAdminAccountState(session Session, accountID string, status *string, schedulable *bool) error {
+	if status == nil && schedulable == nil {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	if status != nil {
+		if _, err := s.updateSub2APIAdminAccountState(session, accountID, status, nil, schedulable != nil); err != nil {
+			return err
+		}
+	} else {
+		state, err := s.GetSub2APIAdminAccountState(session, accountID)
+		if err != nil {
+			return err
+		}
+		if state.Schedulable == nil {
+			return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+	}
+	if schedulable == nil {
+		return nil
+	}
+
+	if err := s.setSub2APIAdminAccountSchedulable(session, accountID, *schedulable); err != nil {
+		return err
+	}
+	verified, err := s.GetSub2APIAdminAccountState(session, accountID)
+	if err != nil {
+		return err
+	}
+	if verified.Schedulable == nil || *verified.Schedulable != *schedulable {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	if status != nil && normalizeSub2APIAccountStatus(verified.Status) != normalizeSub2APIAccountStatus(*status) {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return nil
+}
+
+// UpdateSub2APIAdminAccountGroupIDs keeps only the selected remaining groups
+// while preserving every other account field returned by the detail endpoint.
+func (s *PlatformService) UpdateSub2APIAdminAccountGroupIDs(session Session, accountID string, remainingGroupIDs []string) error {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() || strings.TrimSpace(accountID) == "" {
+		return newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
+	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
+	if err != nil {
+		return err
+	}
+	data := dataRecord(response.Payload)
+	if len(data) == 0 {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	payload := make(map[string]any)
+	for _, key := range []string{
+		"name", "notes", "type", "credentials", "extra", "proxy_id", "status", "schedulable",
+		"concurrency", "priority", "rate_multiplier", "load_factor", "expires_at",
+		"auto_pause_on_expired", "confirm_mixed_channel_risk",
+	} {
+		if value, ok := data[key]; ok {
+			payload[key] = value
+		}
+	}
+	// Keep the numeric/string element types supplied by the remote API.
+	groupIDsValue := resolveSub2APIAccountGroupIDsForPayload(data)
+	if len(groupIDsValue) == 0 {
+		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	existingByID := make(map[string]any, len(groupIDsValue))
+	for _, value := range groupIDsValue {
+		existingByID[fmt.Sprint(value)] = value
+	}
+	replacement := make([]any, 0, len(remainingGroupIDs))
+	for _, id := range remainingGroupIDs {
+		id = strings.TrimSpace(id)
+		if existing, ok := existingByID[id]; ok {
+			replacement = append(replacement, existing)
+			continue
+		}
+		numericID, parseErr := strconv.ParseInt(id, 10, 64)
+		if parseErr != nil {
+			return newRequestError(ErrorInvalidResponse, PlatformSub2API)
+		}
+		replacement = append(replacement, numericID)
+	}
+	payload["group_ids"] = replacement
+	options := adminAuthOptions(session)
+	options.Method = http.MethodPut
+	options.Body = payload
+	_, err = s.httpClient.requestJSON(accountURL, options)
+	return err
+}
+
+// UpdateSub2APIAdminAccountDispatch updates both switches using the APIs that
+// Sub2API actually exposes: status uses the account GET+PUT merge, while the
+// schedulable flag uses the dedicated POST endpoint. Unlike the legacy
+// scheduling path, this method does not need to enumerate admin groups first.
+func (s *PlatformService) UpdateSub2APIAdminAccountDispatch(session Session, accountID string, enabled bool) (Sub2APIAdminAccountState, error) {
+	status := "inactive"
+	if enabled {
+		status = "active"
+	}
+	if err := s.UpdateSub2APIAdminAccountState(session, accountID, &status, &enabled); err != nil {
+		return Sub2APIAdminAccountState{}, err
+	}
+	return s.GetSub2APIAdminAccountState(session, accountID)
+}
+
+func (s *PlatformService) setSub2APIAdminAccountSchedulable(session Session, accountID string, enabled bool) error {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() || strings.TrimSpace(accountID) == "" {
+		return newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	schedulableURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID) + "/schedulable"
+	options := adminAuthOptions(session)
+	options.Method = http.MethodPost
+	options.Body = map[string]any{"schedulable": enabled}
+	_, err := s.httpClient.requestJSON(schedulableURL, options)
+	return err
+}
+
+func normalizeSub2APIAccountStatus(status string) string {
+	return strings.ToLower(strings.TrimSpace(status))
+}
+
+func (s *PlatformService) updateSub2APIAdminAccountState(session Session, accountID string, status *string, schedulable *bool, requireSchedulable bool) (Sub2APIAdminAccountState, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	if strings.TrimSpace(accountID) == "" || (status == nil && schedulable == nil) {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
+	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
+	if err != nil {
+		return Sub2APIAdminAccountState{}, err
+	}
+	data := dataRecord(response.Payload)
+	if len(data) == 0 {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	currentSchedulable := firstBoolValue(data, []string{"schedulable"})
+	if requireSchedulable && currentSchedulable == nil {
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+
+	payload := make(map[string]any)
+	for _, key := range []string{
+		"name", "notes", "type", "credentials", "extra", "proxy_id",
+		"status", "schedulable", "concurrency", "priority", "rate_multiplier", "load_factor",
+		"expires_at", "auto_pause_on_expired", "confirm_mixed_channel_risk",
+	} {
+		if value, ok := data[key]; ok {
+			payload[key] = value
+		}
+	}
+	if status != nil {
+		payload["status"] = *status
+	}
+	if schedulable != nil {
+		payload["schedulable"] = *schedulable
+	}
+	if groupIDs := resolveSub2APIAccountGroupIDsForPayload(data); len(groupIDs) > 0 {
+		payload["group_ids"] = groupIDs
+	}
+
+	options := adminAuthOptions(session)
+	options.Method = http.MethodPut
+	options.Body = payload
+	updated, err := s.httpClient.requestJSON(accountURL, options)
+	if err != nil {
+		return Sub2APIAdminAccountState{}, err
+	}
+
+	result := Sub2APIAdminAccountState{
+		Name:        safeString(data, "name"),
+		Status:      stringOrNumberField(data, []string{"status"}),
+		Schedulable: currentSchedulable,
+	}
+	if status != nil {
+		result.Status = *status
+	}
+	if schedulable != nil {
+		result.Schedulable = schedulable
+	}
+	// Some Sub2API versions return the updated account from PUT. Prefer those
+	// values when present, while remaining compatible with empty PUT responses.
+	if updatedData := dataRecord(updated.Payload); len(updatedData) > 0 {
+		if value := stringOrNumberField(updatedData, []string{"status"}); value != "" {
+			result.Status = value
+		}
+		if value := firstBoolValue(updatedData, []string{"schedulable"}); value != nil {
+			result.Schedulable = value
+		}
+	}
+	return result, nil
+}
+
+// UpdateSub2APIAdminAccountName updates only the display name of a Sub2API
+// admin account while preserving the complete account configuration returned
+// by the detail endpoint.
+func (s *PlatformService) UpdateSub2APIAdminAccountName(session Session, accountID string, name string) error {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return newRequestError(ErrorAuth, PlatformSub2API)
 	}
-	if strings.TrimSpace(accountID) == "" {
+	if strings.TrimSpace(accountID) == "" || strings.TrimSpace(name) == "" {
 		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
-	authOptions := adminAuthOptions(session)
 
-	getURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
-	response, err := s.httpClient.requestJSON(getURL, authOptions)
+	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
+	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
 	if err != nil {
 		return err
 	}
@@ -2295,29 +2572,24 @@ func (s *PlatformService) UpdateSub2APIAdminAccountStatus(session Session, accou
 		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 
-	payload := map[string]any{
-		"status": status,
-	}
+	payload := map[string]any{"name": name}
 	for _, key := range []string{
-		"name", "notes", "type", "credentials", "extra", "proxy_id",
+		"notes", "type", "credentials", "extra", "proxy_id", "status", "schedulable",
 		"concurrency", "priority", "rate_multiplier", "load_factor",
 		"expires_at", "auto_pause_on_expired", "confirm_mixed_channel_risk",
 	} {
-		if v, ok := data[key]; ok {
-			payload[key] = v
+		if value, ok := data[key]; ok {
+			payload[key] = value
 		}
 	}
-	// group_ids 需要单独解析并保留原始元素类型（数字仍是数字）：sub2api 线上已确认 PUT 传
-	// 字符串化的 group_ids（如 ["50"]）会返回 400，必须和 GET 响应的原始类型一致（如 [50]）。
-	// 解析不到任何分组 ID 时完全不带这个字段，避免用空数组覆盖账号已有的分组绑定。
 	if groupIDs := resolveSub2APIAccountGroupIDsForPayload(data); len(groupIDs) > 0 {
 		payload["group_ids"] = groupIDs
 	}
 
-	updateOptions := adminAuthOptions(session)
-	updateOptions.Method = http.MethodPut
-	updateOptions.Body = payload
-	_, err = s.httpClient.requestJSON(getURL, updateOptions)
+	options := adminAuthOptions(session)
+	options.Method = http.MethodPut
+	options.Body = payload
+	_, err = s.httpClient.requestJSON(accountURL, options)
 	return err
 }
 

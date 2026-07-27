@@ -24,6 +24,7 @@ import {
 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import Tooltip from '@/components/ui/tooltip/Tooltip.vue'
 import {
   cancelLotteryCampaign,
@@ -541,10 +542,10 @@ onMounted(async () => {
       </div>
       <div class="flex flex-wrap items-center gap-2">
         <div class="relative">
-          <select v-model="statusFilter" class="h-10 rounded-lg border border-border/70 bg-surface px-3 pr-9 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" :aria-label="t('admin.lottery.filters.status')">
+          <Select v-model="statusFilter" class="h-10" :aria-label="t('admin.lottery.filters.status')">
             <option value="">{{ t('admin.lottery.filters.all') }}</option>
             <option v-for="status in campaignStatuses" :key="status" :value="status">{{ t(`admin.lottery.status.${status}`) }}</option>
-          </select>
+          </Select>
         </div>
         <Tooltip :text="t('admin.lottery.actions.refresh')">
           <Button variant="secondary" :aria-label="t('admin.lottery.actions.refresh')" :disabled="isLoading" @click="loadCampaigns">
@@ -717,7 +718,7 @@ onMounted(async () => {
           <header class="flex items-center justify-between border-b border-border/60 px-5 py-4"><div><h2 class="text-base font-semibold">{{ t(editingId ? 'admin.lottery.form.editTitle' : 'admin.lottery.form.createTitle') }}</h2><p class="text-xs text-muted-foreground">{{ t('admin.lottery.form.subtitle') }}</p></div><button type="button" class="rounded-lg p-2 text-muted-foreground hover:bg-surface focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" :aria-label="t('admin.lottery.actions.closeDialog')" @click="editorOpen = false"><X class="h-4 w-4" aria-hidden="true" /></button></header>
           <div class="min-h-0 flex-1 space-y-5 overflow-auto p-5">
             <div v-if="formErrorKey" class="rounded-lg border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive" aria-live="polite">{{ t(formErrorKey) }}</div>
-            <div class="grid gap-4 md:grid-cols-2"><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.name') }}<Input v-model="form.name" name="lottery-name" autocomplete="off" :placeholder="t('admin.lottery.form.namePlaceholder')" /></label><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.drawMode') }}<select v-model="form.drawMode" name="lottery-draw-mode" autocomplete="off" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-4 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background"><option v-for="mode in drawModes" :key="mode" :value="mode">{{ t(`admin.lottery.drawMode.${mode}`) }}</option></select></label></div>
+            <div class="grid gap-4 md:grid-cols-2"><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.name') }}<Input v-model="form.name" name="lottery-name" autocomplete="off" :placeholder="t('admin.lottery.form.namePlaceholder')" /></label><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.drawMode') }}<Select v-model="form.drawMode" name="lottery-draw-mode" autocomplete="off" class="h-11"><option v-for="mode in drawModes" :key="mode" :value="mode">{{ t(`admin.lottery.drawMode.${mode}`) }}</option></Select></label></div>
             <label class="block space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.description') }}<textarea v-model="form.description" name="lottery-description" autocomplete="off" rows="3" class="w-full resize-none rounded-lg border border-border/70 bg-surface px-4 py-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" :placeholder="t('admin.lottery.form.descriptionPlaceholder')" /></label>
             <div class="grid gap-4 md:grid-cols-3"><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.registrationStart') }}<Input v-model="form.registrationStart" name="lottery-registration-start" autocomplete="off" type="datetime-local" /></label><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.registrationEnd') }}<Input v-model="form.registrationEnd" name="lottery-registration-end" autocomplete="off" type="datetime-local" /></label><label class="space-y-1 text-sm font-medium">{{ t('admin.lottery.fields.drawAt') }}<Input v-model="form.drawAt" name="lottery-draw-at" autocomplete="off" type="datetime-local" /></label></div>
             <label class="flex items-center gap-3 rounded-lg border border-border/60 bg-surface p-3 text-sm"><input v-model="form.publicWinners" name="lottery-public-winners" autocomplete="off" type="checkbox" class="h-4 w-4 rounded border-border text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background" />{{ t('admin.lottery.fields.publicWinners') }}</label>
@@ -734,9 +735,9 @@ onMounted(async () => {
                 <div class="grid gap-3 md:grid-cols-4">
                   <label class="space-y-1 text-sm font-medium">
                     {{ t('admin.lottery.fields.prizeType') }}
-                    <select v-model="prize.type" :name="`lottery-prize-${index}-type`" autocomplete="off" class="h-11 w-full rounded-lg border border-border/70 bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background">
+                    <Select v-model="prize.type" :name="`lottery-prize-${index}-type`" autocomplete="off" class="h-11">
                       <option v-for="type in prizeTypes" :key="type" :value="type">{{ t(`admin.lottery.prizeType.${type}`) }}</option>
-                    </select>
+                    </Select>
                   </label>
                   <label class="space-y-1 text-sm font-medium md:col-span-2">
                     {{ t('admin.lottery.fields.prizeName') }}
@@ -756,12 +757,11 @@ onMounted(async () => {
                 <div v-else class="mt-3 grid gap-3 md:grid-cols-4">
                   <div class="space-y-1 md:col-span-2">
                     <label :for="`lottery-prize-${index}-subscription-group`" class="text-sm font-medium">{{ t('admin.lottery.fields.subscriptionGroup') }}</label>
-                    <select
+                    <Select
                       :id="`lottery-prize-${index}-subscription-group`"
                       v-model="prize.groupId"
                       :name="`lottery-prize-${index}-subscription-group`"
                       autocomplete="off"
-                      class="h-11 w-full rounded-lg border border-border/70 bg-background px-3 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-60"
                       :disabled="isSubscriptionGroupsLoading"
                       @change="setPrizeSubscriptionGroup(prize)"
                     >
@@ -772,7 +772,7 @@ onMounted(async () => {
                       <option v-for="group in subscriptionGroups" :key="group.id" :value="group.id">
                         {{ t('admin.lottery.form.subscriptionGroupOption', { name: group.name, id: group.id, multiplier: group.multiplier }) }}
                       </option>
-                    </select>
+                    </Select>
                     <div v-if="prize.groupId" class="flex min-h-6 items-center gap-2 text-xs text-muted-foreground">
                       <span>{{ t('admin.lottery.fields.currentMultiplier') }}: <strong class="font-semibold text-foreground">{{ subscriptionGroupForPrize(prize)?.multiplier || t('admin.lottery.common.empty') }}</strong></span>
                     </div>

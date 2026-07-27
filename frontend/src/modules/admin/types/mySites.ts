@@ -233,4 +233,10 @@ export interface RealDisconnectRequest {
   connectionId: string
   mode: 'unlink' | 'full'
   removePricingMapping?: boolean
+  ownGroupIds?: string[]
+}
+
+export interface UpdateRealConnectionGroupsRequest {
+  connectionId: string
+  ownGroupIds: string[]
 }

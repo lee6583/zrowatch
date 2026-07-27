@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2 } from 'lucide-vue-next'
+import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
 import { Tooltip } from '@/components/ui/tooltip'
+import { getMySiteMappingOptions, listRealConnections } from '../api/mySites'
 import { getStrategySettings } from '../api/settings'
 import { useUpstreamSites } from '../composables/useUpstreamSites'
 import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
@@ -12,7 +14,39 @@ import type { UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSite
 
 const { t, locale } = useI18n()
 
-const searchQuery = ref('')
+const upstreamFilterStorageKey = 'transit-hub:admin:upstream-filters.v1'
+
+type StoredUpstreamFilters = {
+  searchQuery?: string
+  platformFilter?: string
+  connectedGroupTypeFilter?: string
+}
+
+const readStoredUpstreamFilters = (): StoredUpstreamFilters => {
+  try {
+    const raw = window.localStorage.getItem(upstreamFilterStorageKey)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as StoredUpstreamFilters
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+const writeStoredUpstreamFilters = (filters: StoredUpstreamFilters): void => {
+  try {
+    window.localStorage.setItem(upstreamFilterStorageKey, JSON.stringify(filters))
+  } catch {
+    // Storage may be unavailable in private browsing or restricted environments.
+  }
+}
+
+const storedFilters = readStoredUpstreamFilters()
+const searchQuery = ref(typeof storedFilters.searchQuery === 'string' ? storedFilters.searchQuery : '')
+const platformFilter = ref(typeof storedFilters.platformFilter === 'string' ? storedFilters.platformFilter : '')
+const connectedGroupTypeFilter = ref(typeof storedFilters.connectedGroupTypeFilter === 'string' ? storedFilters.connectedGroupTypeFilter : '')
+const connectedGroupKeys = ref(new Set<string>())
+const groupTargetKey = (siteId: string, groupName: string): string => `${siteId}\u0000${groupName}`
 const isAddModalOpen = ref(false)
 const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
@@ -99,6 +133,14 @@ const createEmptyForm = (): UpstreamSiteForm => ({
 
 const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
 
+watch([searchQuery, platformFilter, connectedGroupTypeFilter], () => {
+  writeStoredUpstreamFilters({
+    searchQuery: searchQuery.value,
+    platformFilter: platformFilter.value,
+    connectedGroupTypeFilter: connectedGroupTypeFilter.value,
+  })
+})
+
 watch(
   () => newSiteForm.value.platform,
   (platform) => {
@@ -165,18 +207,48 @@ const confirmDeleteSite = async () => {
   }
 }
 
+const connectedGroupTypes = computed(() => {
+  const types = new Set<string>()
+  for (const site of upstreamSites.value) {
+    for (const group of site.metrics.groups) {
+      const type = group.platform?.trim()
+      if (type && connectedGroupKeys.value.has(groupTargetKey(site.id, group.name))) types.add(type)
+    }
+  }
+  return Array.from(types).sort((first, second) => first.localeCompare(second))
+})
+
+const hasLoadedConnectedGroupKeys = ref(false)
+
+watch(connectedGroupTypes, (types) => {
+  if (!hasLoadedConnectedGroupKeys.value) return
+  if (connectedGroupTypeFilter.value && !types.some(type => type.toLowerCase() === connectedGroupTypeFilter.value.toLowerCase())) {
+    connectedGroupTypeFilter.value = ''
+  }
+})
+
 const filteredSites = computed(() => {
-  if (!searchQuery.value) return upstreamSites.value
-  return upstreamSites.value.filter(site =>
-    site.name.toLowerCase().includes(searchQuery.value.toLowerCase())
-    || site.baseUrl.toLowerCase().includes(searchQuery.value.toLowerCase())
-  )
+  const keyword = searchQuery.value.trim().toLowerCase()
+  const platform = platformFilter.value.toLowerCase()
+  const groupType = connectedGroupTypeFilter.value.toLowerCase()
+
+  return upstreamSites.value.filter(site => {
+    const matchesSearch = !keyword
+      || site.name.toLowerCase().includes(keyword)
+      || site.baseUrl.toLowerCase().includes(keyword)
+    const matchesPlatform = !platform || site.platform.toLowerCase() === platform
+    const matchesGroupType = !groupType || connectedGroupsForSite(site).some(group => (
+      group.platform?.toLowerCase() === groupType
+    ))
+    return matchesSearch && matchesPlatform && matchesGroupType
+  })
 })
 
 const statusClasses: Record<UpstreamStatus, string> = {
   connecting: 'bg-primary/10 text-primary border-primary/20',
   syncing: 'bg-warning/10 text-warning border-warning/20',
   connected: 'bg-signal/10 text-signal border-signal/20',
+  disabled: 'bg-destructive/10 text-destructive border-destructive/20',
   error: 'bg-warning/10 text-warning border-warning/20',
 }
 
@@ -187,15 +259,51 @@ const deletingSite = computed(() => upstreamSites.value.find((site) => site.id =
 // Groups Modal Logic
 const isGroupsModalOpen = ref(false)
 const selectedSiteForGroups = ref<UpstreamSite | null>(null)
+const isLoadingGroupConnections = ref(false)
+
+watch(upstreamSites, (sites) => {
+  const selectedSiteId = selectedSiteForGroups.value?.id
+  if (!selectedSiteId) return
+  const latestSite = sites.find(site => site.id === selectedSiteId)
+  if (latestSite && latestSite !== selectedSiteForGroups.value) selectedSiteForGroups.value = latestSite
+})
+
+const loadConnectedGroupKeys = async () => {
+  isLoadingGroupConnections.value = true
+  try {
+    const [mappingOptions, realConnections] = await Promise.all([
+      getMySiteMappingOptions().catch(() => ({ mappings: [] })),
+      listRealConnections().catch(() => []),
+    ])
+    const nextKeys = new Set<string>()
+
+    for (const mapping of mappingOptions.mappings ?? []) {
+      for (const target of mapping.upstreamTargets ?? []) {
+        nextKeys.add(groupTargetKey(target.siteId, target.groupName))
+      }
+    }
+    for (const connection of realConnections) {
+      if (connection.status && connection.status !== 'active') continue
+      nextKeys.add(groupTargetKey(connection.upstreamSiteId, connection.upstreamGroupName))
+    }
+
+    connectedGroupKeys.value = nextKeys
+  } finally {
+    isLoadingGroupConnections.value = false
+    hasLoadedConnectedGroupKeys.value = true
+  }
+}
 
 const openGroupsModal = (site: UpstreamSite) => {
   selectedSiteForGroups.value = site
   isGroupsModalOpen.value = true
+  void loadConnectedGroupKeys()
 }
 
 const closeGroupsModal = () => {
   isGroupsModalOpen.value = false
   selectedSiteForGroups.value = null
+  isLoadingGroupConnections.value = false
 }
 
 const isSiteSettingsOpen = ref(false)
@@ -229,6 +337,25 @@ const groupedGroups = computed<Record<string, UpstreamGroupInfo[]>>(() => {
   }, {})
 })
 
+const isGroupConnected = (group: UpstreamGroupInfo): boolean => {
+  if (!selectedSiteForGroups.value) return false
+  return connectedGroupKeys.value.has(groupTargetKey(selectedSiteForGroups.value.id, group.name))
+}
+
+const connectedGroupsForSite = (site: UpstreamSite): UpstreamGroupInfo[] => (
+  site.metrics.groups.filter(group => connectedGroupKeys.value.has(groupTargetKey(site.id, group.name)))
+)
+
+const connectedGroupPreview = (site: UpstreamSite): string => {
+  if (isLoadingGroupConnections.value) return t('admin.upstream.fields.checkingConnections')
+  const groups = connectedGroupsForSite(site)
+  return groups.length > 0
+    ? t('admin.upstream.fields.connectedGroupsPreview', {
+      groups: groups.map(group => `${group.name} · ${group.multiplierDisplay}`).join('、'),
+    })
+    : t('admin.upstream.fields.noConnectedGroups')
+}
+
 const cnyMetricDisplay = (site: UpstreamSite, metric: UpstreamMetricValue): string | null => {
   if (metric.value === null || !Number.isFinite(metric.value) || site.rechargeRate <= 0 || !Number.isFinite(site.rechargeRate)) return null
   return t('admin.upstream.currency.cnyValue', { amount: (metric.value * site.rechargeRate).toFixed(2) })
@@ -248,6 +375,7 @@ const lastUpdatedDisplay = (site: UpstreamSite): string => {
 
 onMounted(() => {
   void loadRefreshSettings()
+  void loadConnectedGroupKeys()
 })
 
 onBeforeUnmount(() => {
@@ -259,19 +387,34 @@ onBeforeUnmount(() => {
   <div class="mx-auto w-full max-w-[1600px] space-y-6">
     <!-- Top Action Bar -->
     <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-      <div class="flex flex-col gap-3 w-full sm:w-auto">
-        <div class="relative w-full sm:w-80">
-          <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
-          <input
-            v-model="searchQuery"
-            name="upstreamSearch"
-            type="text"
-            :placeholder="t('admin.upstream.searchPlaceholder')"
-            :aria-label="t('admin.upstream.searchPlaceholder')"
-            autocomplete="off"
-            spellcheck="false"
-            class="h-10 w-full rounded-lg border border-border/50 bg-surface pl-10 pr-4 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
-          />
+      <div class="flex w-full flex-col gap-3 sm:flex-1">
+        <div class="flex w-full flex-col gap-2 sm:flex-row sm:flex-wrap">
+          <div class="relative w-full sm:w-80 sm:shrink-0">
+            <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
+            <input
+              v-model="searchQuery"
+              name="upstreamSearch"
+              type="text"
+              :placeholder="t('admin.upstream.searchPlaceholder')"
+              :aria-label="t('admin.upstream.searchPlaceholder')"
+              autocomplete="off"
+              spellcheck="false"
+              class="h-10 w-full rounded-lg border border-border/50 bg-surface pl-10 pr-4 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
+            />
+          </div>
+          <div class="w-full sm:w-44 sm:shrink-0">
+            <Select v-model="platformFilter" :aria-label="t('admin.upstream.filters.platform')">
+              <option value="">{{ t('admin.upstream.filters.allPlatforms') }}</option>
+              <option value="sub2api">{{ t('admin.upstream.modal.form.platforms.sub2api') }}</option>
+              <option value="newapi">{{ t('admin.upstream.modal.form.platforms.newapi') }}</option>
+            </Select>
+          </div>
+          <div class="w-full sm:w-48 sm:shrink-0">
+            <Select v-model="connectedGroupTypeFilter" :aria-label="t('admin.upstream.filters.connectedGroupType')">
+              <option value="">{{ t('admin.upstream.filters.allConnectedGroupTypes') }}</option>
+              <option v-for="type in connectedGroupTypes" :key="type" :value="type">{{ type }}</option>
+            </Select>
+          </div>
         </div>
         <p class="text-xs text-muted-foreground">
           {{ t('admin.upstream.summary', { connected: connectedCount, total: upstreamSites.length }) }}
@@ -306,6 +449,7 @@ onBeforeUnmount(() => {
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.balance') }}</th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.todayConsume') }}</th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.historyRecharge') }}</th>
+              <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.connectedGroups') }}</th>
               <th class="px-6 py-4 font-medium text-right">{{ t('admin.upstream.action.actions') }}</th>
             </tr>
           </thead>
@@ -350,6 +494,7 @@ onBeforeUnmount(() => {
                 >
                   <Loader2 v-if="site.status === 'connecting' || site.status === 'syncing'" class="w-3.5 h-3.5 animate-spin" />
                   <CheckCircle2 v-else-if="site.status === 'connected'" class="w-3.5 h-3.5" />
+                  <PowerOff v-else-if="site.status === 'disabled'" class="w-3.5 h-3.5" />
                   <XCircle v-else class="w-3.5 h-3.5" />
                   {{ statusLabel(site.status) }}
                 </div>
@@ -384,16 +529,34 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </td>
+              <td class="min-w-[240px] px-6 py-4">
+                <div v-if="isLoadingGroupConnections" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                  {{ t('admin.upstream.fields.checkingConnections') }}
+                </div>
+                <div v-else-if="connectedGroupsForSite(site).length > 0" class="flex flex-wrap gap-1.5">
+                  <span
+                    v-for="group in connectedGroupsForSite(site)"
+                    :key="`${site.id}-${group.name}`"
+                    class="inline-flex max-w-full items-center rounded-md border border-primary/20 bg-primary/10 px-2 py-1 text-xs font-medium text-primary"
+                    :title="`${group.name} · ${group.multiplierDisplay}`"
+                  >
+                    <span class="truncate">{{ group.name }} · {{ group.multiplierDisplay }}</span>
+                  </span>
+                </div>
+                <span v-else class="text-xs text-muted-foreground">{{ t('admin.upstream.fields.noConnectedGroups') }}</span>
+              </td>
               <td class="px-6 py-4 text-right">
                 <div class="flex items-center justify-end gap-2">
-                  <Button
-                    v-if="site.metrics.groups.length > 0"
-                    variant="ghost"
-                    class="h-8 px-2 text-xs text-primary hover:text-primary hover:bg-primary/10"
-                    @click="openGroupsModal(site)"
-                  >
-                    {{ t('admin.upstream.fields.availableGroups') }}
-                  </Button>
+                  <Tooltip v-if="site.metrics.groups.length > 0" :text="connectedGroupPreview(site)" wide>
+                    <Button
+                      variant="ghost"
+                      class="h-8 px-2 text-xs text-primary hover:text-primary hover:bg-primary/10"
+                      @click="openGroupsModal(site)"
+                    >
+                      {{ t('admin.upstream.fields.availableGroups') }}
+                    </Button>
+                  </Tooltip>
                   <Tooltip :text="syncingSiteIds.has(site.id) ? t('admin.upstream.action.syncing') : t('admin.upstream.action.sync')">
                     <button
                       class="p-1.5 rounded-md text-muted-foreground hover:bg-primary/10 hover:text-primary transition-colors"
@@ -432,7 +595,7 @@ onBeforeUnmount(() => {
               </td>
             </tr>
             <tr v-if="filteredSites.length === 0">
-              <td colspan="7" class="px-6 py-12 text-center text-muted-foreground">
+              <td colspan="8" class="px-6 py-12 text-center text-muted-foreground">
                 {{ t('admin.upstream.empty.description') }}
               </td>
             </tr>
@@ -494,12 +657,16 @@ onBeforeUnmount(() => {
         <!-- Modal Content -->
         <div role="dialog" aria-modal="true" :aria-label="t('admin.upstream.fields.availableGroups')" class="relative max-h-[calc(100dvh-2rem)] w-full max-w-2xl overflow-hidden rounded-xl border border-border/60 border-t-2 border-t-primary bg-card shadow-2xl animate-in fade-in zoom-in-95 duration-200">
 
-          <div class="flex items-center justify-between px-6 py-5 border-b border-border/40">
-            <h3 class="text-lg font-semibold text-foreground">
+          <div class="flex items-center gap-3 border-b border-border/40 px-6 py-5">
+            <h3 class="min-w-0 flex-1 text-lg font-semibold text-foreground">
               {{ t('admin.upstream.fields.availableGroups') }}
               <span class="text-muted-foreground ml-2 text-sm font-medium">{{ selectedSiteForGroups?.name }}</span>
             </h3>
-            <button type="button" @click="closeGroupsModal" class="rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" :aria-label="t('admin.upstream.fields.closeGroupsModal')">
+            <span v-if="isLoadingGroupConnections" class="inline-flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground">
+              <Loader2 class="h-3.5 w-3.5 animate-spin" />
+              {{ t('admin.upstream.fields.checkingConnections') }}
+            </span>
+            <button type="button" @click="closeGroupsModal" class="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-surface-elevated hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary" :aria-label="t('admin.upstream.fields.closeGroupsModal')">
               <X class="w-5 h-5" />
             </button>
           </div>
@@ -514,9 +681,18 @@ onBeforeUnmount(() => {
                 <button
                   v-for="group in groups"
                   :key="group.name"
-                  class="flex flex-col items-center justify-center p-3 rounded-xl border border-border/60 bg-surface/50 hover:bg-surface hover:border-primary/50 transition-colors text-center group"
+                  type="button"
+                  class="group relative flex flex-col items-center justify-center rounded-xl border p-3 text-center transition-colors"
+                  :class="isGroupConnected(group)
+                    ? 'border-primary/70 bg-primary/[0.10] ring-1 ring-primary/30 hover:border-primary hover:bg-primary/[0.14]'
+                    : 'border-border/60 bg-surface/50 hover:border-primary/50 hover:bg-surface'"
+                  :aria-label="`${group.name}${isGroupConnected(group) ? ` - ${t('admin.upstream.fields.connected')}` : ''}`"
                 >
-                  <span class="text-sm font-medium text-foreground truncate w-full group-hover:text-primary transition-colors">{{ group.name }}</span>
+                  <span class="w-full truncate text-sm font-medium transition-colors" :class="isGroupConnected(group) ? 'text-primary' : 'text-foreground group-hover:text-primary'">{{ group.name }}</span>
+                  <span v-if="isGroupConnected(group)" class="mt-1.5 inline-flex items-center gap-1 text-[10px] font-semibold text-primary">
+                    <CheckCircle2 class="h-3 w-3" />
+                    {{ t('admin.upstream.fields.connected') }}
+                  </span>
                   <span
                     v-if="group.multiplier !== null && selectedSiteForGroups && selectedSiteForGroups.rechargeRate > 0"
                     class="mt-2 text-xs font-semibold text-primary px-2 py-0.5 rounded-md bg-primary/10 border border-primary/20"
@@ -599,23 +775,16 @@ onBeforeUnmount(() => {
                   <span class="text-red-500">*</span>
                   {{ t('admin.upstream.modal.form.platform') }}
                 </label>
-                <div class="relative">
-                  <select
-                    id="upstream-site-platform"
-                    v-model="newSiteForm.platform"
-                    name="platform"
-                    :disabled="isAdding"
-                    class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
-                  >
-                    <option value="auto">{{ t('admin.upstream.modal.form.platforms.auto') }}</option>
-                    <option value="sub2api">{{ t('admin.upstream.modal.form.platforms.sub2api') }}</option>
-                    <option value="newapi">{{ t('admin.upstream.modal.form.platforms.newapi') }}</option>
-                  </select>
-                  <!-- Custom arrow since we removed appearance -->
-                  <div class="absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none text-muted-foreground">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>
-                  </div>
-                </div>
+                <Select
+                  id="upstream-site-platform"
+                  v-model="newSiteForm.platform"
+                  name="platform"
+                  :disabled="isAdding"
+                >
+                  <option value="auto">{{ t('admin.upstream.modal.form.platforms.auto') }}</option>
+                  <option value="sub2api">{{ t('admin.upstream.modal.form.platforms.sub2api') }}</option>
+                  <option value="newapi">{{ t('admin.upstream.modal.form.platforms.newapi') }}</option>
+                </Select>
               </div>
 
               <!-- Site URL -->

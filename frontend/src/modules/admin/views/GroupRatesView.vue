@@ -2,13 +2,20 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useRouter } from 'vue-router'
-import { AlertCircle, ArrowUpDown, Check, ChevronDown, History, KeyRound, Link2, Loader2, Megaphone, RefreshCw, Search, ServerCog, Sparkles, X } from 'lucide-vue-next'
+import { AlertCircle, ArrowUpDown, Check, History, KeyRound, Link2, Loader2, Megaphone, Pencil, RefreshCw, Search, ServerCog, Settings2, Sparkles, Trash2, X, Zap } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
-import { getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect } from '../api/mySites'
+import { Input } from '@/components/ui/input'
+import { Select } from '@/components/ui/select'
+import { Tooltip } from '@/components/ui/tooltip'
+import { getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect, updateRealConnectionGroups } from '../api/mySites'
 import { getDashboardAdminStatus } from '../api/dashboardAdmin'
+import { getBoundDispatchAccounts, getGroupRateMonitorSettings, getGroupRateMonitorSummaries, probeGroupRateMonitor, saveGroupRateMonitorSettings, updateTargetDispatch } from '../api/connectionHealth'
+import { listUpstreamSites, syncAllUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
+import type { BoundDispatchAccountState, GroupRateMonitorSettings, GroupRateMonitorSummary, GroupRateProbeCycle } from '../types/connectionHealth'
 import type { AdminResourceOption, ConnectionCapabilities, MySiteMapping, MySiteMappingOwnGroupOption, RealConnection, UpstreamKeyItem } from '../types/mySites'
+import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 
 const { t, locale } = useI18n()
@@ -61,11 +68,34 @@ const realConnectionsData = ref<RealConnection[]>([])
 const disconnectingRate = ref<GroupRate | null>(null)
 const disconnectMode = ref<'unlink' | 'full'>('unlink')
 const disconnectRemovePricing = ref(true)
+const disconnectSelectedTargets = ref<string[]>([])
 const isDisconnecting = ref(false)
 const disconnectError = ref('')
-const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || disconnectingRate.value))
+const connectionEditingRate = ref<GroupRate | null>(null)
+const editConnectionGroups = ref<string[]>([])
+const isUpdatingConnectionGroups = ref(false)
+const editConnectionError = ref('')
+const isSyncingUpstream = ref(false)
+const dispatchAccountsById = ref<Map<string, BoundDispatchAccountState>>(new Map())
+const dispatchLoadingAccountIds = ref<Set<string>>(new Set())
+const isLoadingDispatchAccounts = ref(false)
+const dispatchErrorKey = ref('')
+const upstreamSiteURLsById = ref<Map<string, string>>(new Map())
+const groupRateHealthSummaries = ref<Map<string, GroupRateMonitorSummary>>(new Map())
+const isLoadingHealthSummaries = ref(false)
+const healthSummaryErrorKey = ref('')
+const probingHealthGroups = ref<Set<string>>(new Set())
+const isHealthSettingsOpen = ref(false)
+const isLoadingHealthSettings = ref(false)
+const isSavingHealthSettings = ref(false)
+const healthSettingsErrorKey = ref('')
+const healthSettingsDraft = ref<GroupRateMonitorSettings | null>(null)
+const flashingHealthGroups = ref<Set<string>>(new Set())
+const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || connectionEditingRate.value || disconnectingRate.value || isHealthSettingsOpen.value))
 let previouslyFocusedElement: HTMLElement | null = null
 let previousBodyOverflow = ''
+let healthPollingTimer: ReturnType<typeof setInterval> | null = null
+const healthStatusFlashTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 const dialogFocusableSelector = [
   'button:not([disabled])',
@@ -81,7 +111,9 @@ const handleDialogKeydown = (event: KeyboardEvent) => {
   if (!dialog) return
   if (event.key === 'Escape') {
     event.preventDefault()
-    if (disconnectingRate.value && !isDisconnecting.value) closeDisconnect()
+    if (isHealthSettingsOpen.value && !isSavingHealthSettings.value) closeHealthSettings()
+    else if (disconnectingRate.value && !isDisconnecting.value) closeDisconnect()
+    else if (connectionEditingRate.value && !isUpdatingConnectionGroups.value) closeConnectionEditor()
     else if (connectingRate.value && !isActionLoading.value) closeConnector()
     else if (editingRate.value && !isActionLoading.value) closeTypeEditor()
     else if (isHistoryOpen.value) closeHistory()
@@ -125,6 +157,25 @@ const mappedOwnGroupsForRate = (rate: GroupRate): string[] => (
     .map((mapping) => mapping.ownGroup)
 )
 
+const ownGroupsByName = computed(() => new Map(
+  ownGroups.value.map(group => [group.groupName, group]),
+))
+
+const downstreamGroupsForRate = (rate: GroupRate): Array<{ key: string; name: string; multiplier: number | null }> => {
+  const seen = new Set<string>()
+  return mappedOwnGroupsForRate(rate).flatMap((name) => {
+    const normalizedName = name.trim()
+    if (!normalizedName || seen.has(normalizedName)) return []
+    seen.add(normalizedName)
+    const group = ownGroupsByName.value.get(normalizedName)
+    return [{
+      key: group?.id ?? normalizedName,
+      name: normalizedName,
+      multiplier: group?.multiplier ?? null,
+    }]
+  })
+}
+
 const firstMappedOwnGroupForRate = (rate: GroupRate): string => mappedOwnGroupsForRate(rate)[0] ?? ''
 
 const filteredOwnGroups = computed(() => {
@@ -143,9 +194,78 @@ const realConnectionForRate = (rate: GroupRate): RealConnection | undefined =>
     (c.upstreamGroupId === rate.groupId || ((!c.upstreamGroupId || !rate.groupId) && c.upstreamGroupName === rate.groupName))
   ))
 
+const isSub2APIPlatform = (platform: string | undefined): boolean => platform?.toLowerCase().includes('sub2') ?? false
+
+const dispatchAccountForRate = (rate: GroupRate): BoundDispatchAccountState | undefined => {
+  const connection = realConnectionForRate(rate)
+  if (!connection || !isSub2APIPlatform(connection.adminPlatform || adminPlatform.value)) return undefined
+  return dispatchAccountsById.value.get(String(connection.adminAccountId))
+}
+
+const supportsDispatch = (rate: GroupRate): boolean => {
+  const connection = realConnectionForRate(rate)
+  return !rate.deleted && Boolean(connection) && isSub2APIPlatform(connection?.adminPlatform || adminPlatform.value)
+}
+
+const hasDispatchState = (rate: GroupRate): boolean => {
+  const account = dispatchAccountForRate(rate)
+  return account?.available === true && Boolean(account.targetId) && typeof account.schedulable === 'boolean'
+}
+
+const isDispatchEnabled = (account: BoundDispatchAccountState | undefined): boolean => {
+  return account?.schedulable === true
+}
+
+const isDispatchEnabledForRate = (rate: GroupRate): boolean => isDispatchEnabled(dispatchAccountForRate(rate))
+
+const isDispatchUpdating = (rate: GroupRate): boolean => {
+  const connection = realConnectionForRate(rate)
+  return connection ? dispatchLoadingAccountIds.value.has(String(connection.adminAccountId)) : false
+}
+
+const isDispatchUnavailable = (rate: GroupRate): boolean => (
+  supportsDispatch(rate) && !isLoadingDispatchAccounts.value && !hasDispatchState(rate)
+)
+
+const dispatchActionLabel = (rate: GroupRate): string => t(
+  isDispatchEnabledForRate(rate) ? 'admin.groupRates.dispatch.disableForRate' : 'admin.groupRates.dispatch.enableForRate',
+  { site: rate.siteName, group: rate.groupName },
+)
+
+const dispatchStatusLabel = (rate: GroupRate): string => {
+  if (isDispatchUpdating(rate)) return t('admin.groupRates.dispatch.updating')
+  if (isLoadingDispatchAccounts.value) return t('admin.groupRates.dispatch.loading')
+  if (isDispatchUnavailable(rate)) {
+    return t(dispatchAccountForRate(rate)?.unavailableReason === 'not_found'
+      ? 'admin.groupRates.dispatch.accountMissing'
+      : 'admin.groupRates.dispatch.unavailable')
+  }
+  return dispatchActionLabel(rate)
+}
+
 const isRealConnected = (rate: GroupRate): boolean => !!realConnectionForRate(rate)
+const siteURLForRate = (rate: GroupRate): string => upstreamSiteURLsById.value.get(rate.siteId) ?? ''
 const isPricingMapped = (rate: GroupRate): boolean => rate.pricingMapped ?? mappedOwnGroupsForRate(rate).length > 0
 const disconnectConnection = computed(() => disconnectingRate.value ? realConnectionForRate(disconnectingRate.value) : undefined)
+const disconnectConnections = computed(() => disconnectingRate.value
+  ? realConnectionsData.value.filter(c => (
+      c.upstreamSiteId === disconnectingRate.value?.siteId &&
+      (c.upstreamGroupId === disconnectingRate.value?.groupId || ((!c.upstreamGroupId || !disconnectingRate.value?.groupId) && c.upstreamGroupName === disconnectingRate.value?.groupName))
+    ))
+  : [])
+const disconnectTargets = computed(() => disconnectConnections.value.flatMap((connection) => {
+  const names = connection.ownGroupNames ?? []
+  return connection.ownGroupIds.map((groupId, index) => ({
+    key: `${connection.id}:${groupId}`,
+    connectionId: connection.id,
+    groupId,
+    name: names[index] || groupId,
+    accountName: connection.adminAccountName,
+  }))
+}))
+const disconnectCanDeleteRemote = computed(() => disconnectConnections.value.some(connection => connection.canDeleteRemote !== false))
+const disconnectTargetCount = computed(() => disconnectSelectedTargets.value.length)
+const connectionBeingEdited = computed(() => connectionEditingRate.value ? realConnectionForRate(connectionEditingRate.value) : undefined)
 
 const loadRealConnections = async () => {
   try {
@@ -162,6 +282,225 @@ const loadAdminPlatform = async () => {
   } catch {
     adminPlatform.value = ''
   }
+}
+
+const updateUpstreamSiteURLs = (sites: UpstreamSiteResponse[]) => {
+  const urls = new Map<string, string>()
+  for (const site of sites) {
+    const baseURL = site.baseUrl.trim()
+    if (baseURL && /^https?:\/\//i.test(baseURL)) urls.set(site.id, baseURL)
+  }
+  upstreamSiteURLsById.value = urls
+}
+
+const loadUpstreamSiteURLs = async () => {
+  try {
+    updateUpstreamSiteURLs(await listUpstreamSites())
+  } catch {
+    // The rates table remains usable when the optional external link lookup fails.
+  }
+}
+
+const rateHealthKey = (siteId: string, groupId: string | null | undefined, groupName: string): string => (
+  `${siteId}|${groupId?.trim() ? `id:${groupId.trim()}` : `name:${groupName.trim()}`}`
+)
+
+const healthSummaryForRate = (rate: GroupRate): GroupRateMonitorSummary | undefined => (
+  groupRateHealthSummaries.value.get(rateHealthKey(rate.siteId, rate.groupId, rate.groupName))
+)
+
+const healthHistorySize = 5
+
+const healthSlotsForRate = (rate: GroupRate): Array<GroupRateProbeCycle | null> => {
+  const events = healthSummaryForRate(rate)?.events ?? []
+  return [
+    ...Array.from({ length: Math.max(0, healthHistorySize - events.length) }, () => null),
+    ...events.slice(-healthHistorySize),
+  ]
+}
+
+const healthStatusLabel = (rate: GroupRate): string => {
+  const summary = healthSummaryForRate(rate)
+  if (!summary || !summary.model) return t('admin.groupRates.health.status.unconfigured')
+  if (summary.stale) return t('admin.groupRates.health.status.stale')
+  return t(`admin.groupRates.health.status.${summary.status}`)
+}
+
+const healthStatusClasses = (rate: GroupRate): string => {
+  const summary = healthSummaryForRate(rate)
+  if (!summary || !summary.model || summary.stale || summary.status === 'unavailable' || summary.status === 'unconfigured') {
+    return 'text-muted-foreground'
+  }
+  if (summary.status === 'healthy') return 'text-emerald-600 dark:text-emerald-400'
+  if (summary.status === 'warning') return 'text-amber-600 dark:text-amber-400'
+  return 'text-red-500'
+}
+
+const isHealthStatusFlashing = (rate: GroupRate): boolean => (
+  flashingHealthGroups.value.has(rateHealthKey(rate.siteId, rate.groupId, rate.groupName))
+)
+
+const flashHealthStatus = (rate: GroupRate) => {
+  const key = rateHealthKey(rate.siteId, rate.groupId, rate.groupName)
+  const existingTimer = healthStatusFlashTimers.get(key)
+  if (existingTimer) clearTimeout(existingTimer)
+  flashingHealthGroups.value = new Set(flashingHealthGroups.value).add(key)
+  healthStatusFlashTimers.set(key, setTimeout(() => {
+    const next = new Set(flashingHealthGroups.value)
+    next.delete(key)
+    flashingHealthGroups.value = next
+    healthStatusFlashTimers.delete(key)
+  }, 900))
+}
+
+const healthBarClasses = (event: GroupRateProbeCycle | null, stale: boolean): string => {
+  if (!event) return 'bg-muted'
+  const opacity = stale ? ' opacity-40' : ''
+  if (event.status === 'healthy') return `bg-emerald-500${opacity}`
+  if (event.status === 'warning') return `bg-amber-500${opacity}`
+  if (event.status === 'unhealthy') return `bg-red-500${opacity}`
+  return `bg-muted-foreground/35${opacity}`
+}
+
+const healthCycleTooltip = (event: GroupRateProbeCycle | null): string => {
+  if (!event) return t('admin.groupRates.health.noResult')
+  const lines = [
+    formatProbeDateTime(event.createdAt),
+    t(`admin.groupRates.health.trigger.${event.trigger === 'manual' ? 'manual' : 'scheduled'}`),
+    t('admin.groupRates.health.tooltip.model', { model: event.model }),
+  ]
+  for (const detail of event.details) {
+    const latency = detail.latencyMs == null ? t('admin.groupRates.common.placeholder') : `${detail.latencyMs} ms`
+    const result = detail.available
+      ? (detail.healthy ? t('admin.groupRates.health.result.success') : t(`admin.groupRates.health.result.${detail.errorKey ?? 'failed'}`))
+      : t(`admin.groupRates.health.unavailable.${detail.unavailableReason ?? 'unknown'}`)
+    lines.push(`${t('admin.groupRates.health.tooltip.upstreamGroup', { group: detail.accountName || event.upstreamGroupName })} · ${latency} · ${result}`)
+  }
+  return lines.join('\n')
+}
+
+const formatHealthSuccessRate = (rate: GroupRate): string => {
+  const summary = healthSummaryForRate(rate)
+  if (!summary || summary.events.length === 0) return '0%'
+  return `${Math.round(summary.successRate)}%`
+}
+
+const loadHealthSummaries = async (showLoading = false) => {
+  if (statusFilter.value !== 'mapped' || document.visibilityState === 'hidden') return
+  if (showLoading) isLoadingHealthSummaries.value = true
+  healthSummaryErrorKey.value = ''
+  try {
+    const summaries = await getGroupRateMonitorSummaries()
+    const next = new Map<string, GroupRateMonitorSummary>()
+    for (const summary of summaries) {
+      next.set(rateHealthKey(summary.upstreamSiteId, summary.upstreamGroupId, summary.upstreamGroupName), summary)
+    }
+    groupRateHealthSummaries.value = next
+  } catch (error) {
+    healthSummaryErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.loadFailed'
+  } finally {
+    if (showLoading) isLoadingHealthSummaries.value = false
+  }
+}
+
+const stopHealthPolling = () => {
+  if (healthPollingTimer) clearInterval(healthPollingTimer)
+  healthPollingTimer = null
+}
+
+const startHealthPolling = () => {
+  stopHealthPolling()
+  if (statusFilter.value !== 'mapped' || document.visibilityState === 'hidden') return
+  void loadHealthSummaries(true)
+  healthPollingTimer = setInterval(() => void loadHealthSummaries(), 10_000)
+}
+
+const handleVisibilityChange = () => {
+  if (document.visibilityState === 'hidden') stopHealthPolling()
+  else startHealthPolling()
+}
+
+const openHealthSettings = async () => {
+  isHealthSettingsOpen.value = true
+  isLoadingHealthSettings.value = true
+  healthSettingsErrorKey.value = ''
+  try {
+    const settings = await getGroupRateMonitorSettings()
+    healthSettingsDraft.value = {
+      ...settings,
+      restore: { ...settings.restore },
+    }
+  } catch (error) {
+    healthSettingsErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsLoadFailed'
+  } finally {
+    isLoadingHealthSettings.value = false
+  }
+}
+
+const closeHealthSettings = () => {
+  isHealthSettingsOpen.value = false
+  healthSettingsDraft.value = null
+  healthSettingsErrorKey.value = ''
+}
+
+const saveHealthSettings = async () => {
+  const draft = healthSettingsDraft.value
+  if (!draft || isSavingHealthSettings.value) return
+  if (draft.enabled && !draft.defaultModel.trim()) {
+    healthSettingsErrorKey.value = 'admin.groupRates.health.errors.modelRequired'
+    return
+  }
+  isSavingHealthSettings.value = true
+  healthSettingsErrorKey.value = ''
+  try {
+    const saved = await saveGroupRateMonitorSettings({
+      enabled: draft.enabled,
+      probeIntervalSeconds: Number(draft.probeIntervalSeconds),
+      failureThreshold: Number(draft.failureThreshold),
+      defaultModel: draft.defaultModel.trim(),
+    })
+    healthSettingsDraft.value = { ...saved, restore: { ...saved.restore } }
+    closeHealthSettings()
+    await loadHealthSummaries(true)
+  } catch (error) {
+    healthSettingsErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsSaveFailed'
+  } finally {
+    isSavingHealthSettings.value = false
+  }
+}
+
+const probeHealthRate = async (rate: GroupRate) => {
+  const key = rateHealthKey(rate.siteId, rate.groupId, rate.groupName)
+  if (probingHealthGroups.value.has(key)) return
+  healthSummaryErrorKey.value = ''
+  probingHealthGroups.value = new Set(probingHealthGroups.value).add(key)
+  try {
+    const response = await probeGroupRateMonitor({
+      upstreamSiteId: rate.siteId,
+      upstreamGroupId: rate.groupId ?? '',
+      upstreamGroupName: rate.groupName,
+    })
+    const summaries = new Map(groupRateHealthSummaries.value)
+    summaries.set(key, response.summary)
+    groupRateHealthSummaries.value = summaries
+    const accounts = new Map(dispatchAccountsById.value)
+    for (const account of response.dispatchAccounts) accounts.set(String(account.id), account)
+    dispatchAccountsById.value = accounts
+    flashHealthStatus(rate)
+  } catch (error) {
+    healthSummaryErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.probeFailed'
+  } finally {
+    const probing = new Set(probingHealthGroups.value)
+    probing.delete(key)
+    probingHealthGroups.value = probing
+  }
+}
+
+const isHealthProbeRunning = (rate: GroupRate): boolean => probingHealthGroups.value.has(rateHealthKey(rate.siteId, rate.groupId, rate.groupName))
+
+const canProbeHealthRate = (rate: GroupRate): boolean => {
+  const summary = healthSummaryForRate(rate)
+  return Boolean(summary?.model && isRealConnected(rate))
 }
 
 const filteredRates = computed(() => {
@@ -206,6 +545,11 @@ watch(searchQuery, (value) => {
     void setSearch(value)
   }, 300)
 })
+
+watch(statusFilter, (status) => {
+  if (status === 'mapped') startHealthPolling()
+  else stopHealthPolling()
+})
 const hasAnyRateData = computed(() => Object.values(statusCounts.value).some(count => count > 0))
 const hasActiveRateFilters = computed(() => Boolean(
   searchQuery.value.trim() ||
@@ -230,12 +574,25 @@ watch(isAnyDialogOpen, async (open) => {
 
 onMounted(() => {
   document.addEventListener('keydown', handleDialogKeydown)
-	void Promise.all([loadRates(), loadRealConnections(), loadAdminPlatform()])
+	document.addEventListener('visibilitychange', handleVisibilityChange)
+	void Promise.all([
+    loadRates(),
+    loadRealConnections(),
+    loadAdminPlatform(),
+    loadUpstreamSiteURLs(),
+    loadDispatchAccounts(),
+    loadMappingOptions().catch(() => undefined),
+  ])
+	if (statusFilter.value === 'mapped') startHealthPolling()
 })
 
 onBeforeUnmount(() => {
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+	for (const timer of healthStatusFlashTimers.values()) clearTimeout(timer)
+	healthStatusFlashTimers.clear()
+	stopHealthPolling()
   document.removeEventListener('keydown', handleDialogKeydown)
+	document.removeEventListener('visibilitychange', handleVisibilityChange)
   document.body.style.overflow = previousBodyOverflow
 })
 
@@ -302,6 +659,20 @@ const formatDateTime = (value: string | null): string => {
     day: '2-digit',
     hour: '2-digit',
     minute: '2-digit',
+  }).format(date)
+}
+
+const formatProbeDateTime = (value: string | null): string => {
+  if (!value) return t('admin.groupRates.common.placeholder')
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return t('admin.groupRates.common.placeholder')
+  return new Intl.DateTimeFormat(locale.value, {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
   }).format(date)
 }
 
@@ -440,6 +811,24 @@ const setConnectMode = async (mode: 'real' | 'bind') => {
   }
 }
 
+const loadDispatchAccounts = async () => {
+  isLoadingDispatchAccounts.value = true
+  dispatchErrorKey.value = ''
+  try {
+    const states = await getBoundDispatchAccounts()
+    const accounts = new Map<string, BoundDispatchAccountState>()
+    for (const account of states) {
+      accounts.set(String(account.id), account)
+    }
+    dispatchAccountsById.value = accounts
+  } catch {
+    dispatchAccountsById.value = new Map()
+    dispatchErrorKey.value = 'admin.groupRates.dispatch.loadFailed'
+  } finally {
+    isLoadingDispatchAccounts.value = false
+  }
+}
+
 const loadAdminResourcesForGroup = async (groupId: string) => {
   selectedAdminGroupId.value = groupId
   selectedAdminResourceId.value = ''
@@ -466,15 +855,19 @@ const submitTypeEditor = async () => {
   closeTypeEditor()
 }
 
-const loadMySiteMappingData = async (force = false) => {
+const loadMappingOptions = async (force = false) => {
   if (hasLoadedMappingOptions.value && !force) return
+  const options = await getMySiteMappingOptions()
+  ownGroups.value = options.ownGroups
+  mySiteMappings.value = options.mappings ?? []
+  connectionCapabilities.value = options.connectionCapabilities ?? null
+  hasLoadedMappingOptions.value = true
+}
+
+const loadMySiteMappingData = async (force = false) => {
   isActionLoading.value = true
   try {
-    const options = await getMySiteMappingOptions()
-    ownGroups.value = options.ownGroups
-    mySiteMappings.value = options.mappings ?? []
-    connectionCapabilities.value = options.connectionCapabilities ?? null
-    hasLoadedMappingOptions.value = true
+    await loadMappingOptions(force)
   } finally {
     isActionLoading.value = false
   }
@@ -503,9 +896,65 @@ const realConnectError = ref('')
 
 const refreshAfterMutation = async () => {
   try {
-    await Promise.all([loadRates(), loadRealConnections(), loadMySiteMappingData(true)])
+    await Promise.all([loadRates(), loadRealConnections(), loadMySiteMappingData(true), loadDispatchAccounts()])
+    if (statusFilter.value === 'mapped') await loadHealthSummaries(true)
   } catch {
     errorKey.value = 'admin.groupRates.errors.refreshFailed'
+  }
+}
+
+const refreshGroupRates = async () => {
+  if (isSyncingUpstream.value || isLoading.value) return
+  isSyncingUpstream.value = true
+  errorKey.value = null
+  try {
+    updateUpstreamSiteURLs(await syncAllUpstreamSites())
+    await Promise.all([loadRates(), loadRealConnections(), loadMySiteMappingData(true), loadDispatchAccounts()])
+    if (statusFilter.value === 'mapped') await loadHealthSummaries(true)
+  } catch (error) {
+    errorKey.value = error instanceof Error ? error.message : 'admin.groupRates.errors.refreshFailed'
+  } finally {
+    isSyncingUpstream.value = false
+  }
+}
+
+const toggleDispatch = async (rate: GroupRate) => {
+  const connection = realConnectionForRate(rate)
+  const account = dispatchAccountForRate(rate)
+  if (!connection || !account || !supportsDispatch(rate)) return
+
+  const accountId = String(connection.adminAccountId)
+  if (dispatchLoadingAccountIds.value.has(accountId)) return
+  dispatchErrorKey.value = ''
+  const previousAccount = account
+  const enabled = !isDispatchEnabled(account)
+  const optimisticAccount: BoundDispatchAccountState = {
+    ...account,
+    status: enabled ? 'active' : 'inactive',
+    schedulable: enabled,
+    available: true,
+  }
+  const optimisticAccounts = new Map(dispatchAccountsById.value)
+  optimisticAccounts.set(accountId, optimisticAccount)
+  dispatchAccountsById.value = optimisticAccounts
+  dispatchLoadingAccountIds.value = new Set(dispatchLoadingAccountIds.value).add(accountId)
+  try {
+    const state = await updateTargetDispatch(account.targetId, enabled)
+    const updatedAccounts = new Map(dispatchAccountsById.value)
+    const latestAccount = dispatchAccountsById.value.get(accountId) ?? previousAccount
+    updatedAccounts.set(accountId, { ...latestAccount, status: state.status, schedulable: state.schedulable })
+    dispatchAccountsById.value = updatedAccounts
+  } catch (error) {
+    if (dispatchAccountsById.value.get(accountId) === optimisticAccount) {
+      const rolledBackAccounts = new Map(dispatchAccountsById.value)
+      rolledBackAccounts.set(accountId, previousAccount)
+      dispatchAccountsById.value = rolledBackAccounts
+    }
+    dispatchErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.dispatch.updateFailed'
+  } finally {
+    const loadingIds = new Set(dispatchLoadingAccountIds.value)
+    loadingIds.delete(accountId)
+    dispatchLoadingAccountIds.value = loadingIds
   }
 }
 
@@ -597,6 +1046,7 @@ const openDisconnect = (rate: GroupRate) => {
   disconnectingRate.value = rate
   disconnectMode.value = 'unlink'
   disconnectRemovePricing.value = realConnectionForRate(rate)?.pricingMappingEnabled ?? Boolean(rate.pricingMapped)
+  disconnectSelectedTargets.value = []
   disconnectError.value = ''
 }
 
@@ -604,6 +1054,7 @@ const closeDisconnect = () => {
   disconnectingRate.value = null
   disconnectMode.value = 'unlink'
   disconnectRemovePricing.value = true
+  disconnectSelectedTargets.value = []
   disconnectError.value = ''
 }
 
@@ -615,20 +1066,85 @@ const submitDisconnect = async () => {
   isDisconnecting.value = true
   disconnectError.value = ''
   try {
-    await realDisconnect({
-      connectionId: conn.id,
-      mode: disconnectMode.value,
-      removePricingMapping: disconnectRemovePricing.value,
-    })
+    const selectedByConnection = new Map<string, string[]>()
+    for (const target of disconnectTargets.value) {
+      if (!disconnectSelectedTargets.value.includes(target.key)) continue
+      const ids = selectedByConnection.get(target.connectionId) ?? []
+      ids.push(target.groupId)
+      selectedByConnection.set(target.connectionId, ids)
+    }
+    if (selectedByConnection.size === 0) {
+      disconnectError.value = t('admin.groupRates.disconnect.selectTarget')
+      isDisconnecting.value = false
+      return
+    }
+    for (const [connectionId, ownGroupIds] of selectedByConnection) {
+      await realDisconnect({
+        connectionId,
+        mode: disconnectMode.value,
+        ownGroupIds,
+        removePricingMapping: disconnectRemovePricing.value,
+      })
+    }
     closeDisconnect()
-  } catch {
-    disconnectError.value = t('admin.groupRates.disconnect.failed')
+  } catch (error) {
+    const errorKey = error instanceof Error && error.message.startsWith('admin.') ? error.message : 'admin.groupRates.disconnect.failed'
+    disconnectError.value = t(errorKey)
     isDisconnecting.value = false
     return
   }
 
   await refreshAfterMutation()
   isDisconnecting.value = false
+}
+
+const openConnectionEditor = async (rate: GroupRate) => {
+  const connection = realConnectionForRate(rate)
+  if (!connection) return
+  connectionEditingRate.value = rate
+  editConnectionGroups.value = [...connection.ownGroupIds]
+  editConnectionError.value = ''
+  isUpdatingConnectionGroups.value = true
+  try {
+    await loadMappingOptions(true)
+  } catch (error) {
+    const errorKey = error instanceof Error && error.message.startsWith('admin.') ? error.message : 'admin.groupRates.connectionEdit.loadFailed'
+    editConnectionError.value = t(errorKey)
+  } finally {
+    isUpdatingConnectionGroups.value = false
+  }
+}
+
+const closeConnectionEditor = () => {
+  connectionEditingRate.value = null
+  editConnectionGroups.value = []
+  editConnectionError.value = ''
+}
+
+const toggleEditConnectionGroup = (groupId: string) => {
+  editConnectionGroups.value = editConnectionGroups.value.includes(groupId)
+    ? editConnectionGroups.value.filter(id => id !== groupId)
+    : [...editConnectionGroups.value, groupId]
+}
+
+const submitConnectionEditor = async () => {
+  const connection = connectionBeingEdited.value
+  if (!connection || editConnectionGroups.value.length === 0) return
+  isUpdatingConnectionGroups.value = true
+  editConnectionError.value = ''
+  try {
+    await updateRealConnectionGroups({
+      connectionId: connection.id,
+      ownGroupIds: editConnectionGroups.value,
+    })
+    await refreshAfterMutation()
+    closeConnectionEditor()
+  } catch (error) {
+    const errorKey = error instanceof Error && error.message.startsWith('admin.') ? error.message : 'admin.groupRates.connectionEdit.failed'
+    editConnectionError.value = t(errorKey)
+  } finally {
+    isUpdatingConnectionGroups.value = false
+  }
 }
 
 const historyTitle = computed(() => {
@@ -681,9 +1197,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </button>
     </div>
 
-    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 shrink-0">
-      <div class="flex w-full flex-1 flex-col gap-3 sm:flex-row sm:flex-wrap lg:flex-nowrap">
-        <div class="relative w-full sm:w-80 max-w-sm">
+    <div class="flex shrink-0 flex-col gap-4 xl:flex-row xl:items-center">
+      <div class="grid min-w-0 w-full flex-1 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[10rem_8rem_8rem_9.5rem] xl:gap-2">
+        <div class="relative w-full">
           <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
             v-model="searchQuery"
@@ -693,57 +1209,46 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             :aria-label="t('admin.groupRates.filters.searchPlaceholder')"
             autocomplete="off"
             spellcheck="false"
-            class="h-10 w-full rounded-lg border border-border/50 bg-surface pl-10 pr-4 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
+            class="h-11 w-full rounded-lg border border-border/50 bg-surface pl-10 pr-4 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
           />
         </div>
 
-        <div class="relative w-full sm:w-48 sm:shrink-0">
-          <select
-            v-model="typeFilter"
-            class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
-            @change="handleTypeChange"
-          >
+        <div class="w-full">
+          <Select v-model="typeFilter" @change="handleTypeChange">
             <option value="">{{ t('admin.groupRates.common.allTypes') }}</option>
             <option v-for="type in types" :key="type" :value="type">{{ typeLabel(type) }}</option>
-          </select>
-          <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          </Select>
         </div>
 
-        <div class="relative w-full sm:w-44 sm:shrink-0">
-          <select
-            v-model="platformFilter"
-            class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
-            @change="handlePlatformChange"
-          >
+        <div class="w-full">
+          <Select v-model="platformFilter" @change="handlePlatformChange">
             <option value="">{{ t('admin.groupRates.common.allPlatforms') }}</option>
             <option v-for="platform in platforms" :key="platform" :value="platform">{{ platformLabel(platform) }}</option>
-          </select>
-          <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          </Select>
         </div>
 
-        <div class="relative w-full sm:w-52 sm:shrink-0">
+        <div class="relative w-full">
           <ArrowUpDown class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-          <select
-            v-model="sortMode"
-            class="h-10 w-full appearance-none rounded-lg border border-border/50 bg-surface pl-9 pr-8 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
-            @change="handleSortChange"
-          >
+          <Select v-model="sortMode" class="pl-9" @change="handleSortChange">
             <option value="multiplierAsc">{{ t('admin.groupRates.sort.multiplierAsc') }}</option>
             <option value="multiplierDesc">{{ t('admin.groupRates.sort.multiplierDesc') }}</option>
             <option value="siteNameAsc">{{ t('admin.groupRates.sort.siteNameAsc') }}</option>
             <option value="groupNameAsc">{{ t('admin.groupRates.sort.groupNameAsc') }}</option>
-          </select>
-          <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          </Select>
         </div>
       </div>
 
-      <div class="grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:grid-cols-2">
-        <Button variant="secondary" class="h-10 gap-2" @click="router.push('/admin/group-rate-campaigns?action=create')">
+      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto', statusFilter === 'mapped' ? 'sm:grid-cols-3' : 'sm:grid-cols-2']">
+        <Button v-if="statusFilter === 'mapped'" variant="secondary" class="h-11 gap-2" @click="openHealthSettings">
+          <Settings2 class="h-4 w-4" />
+          {{ t('admin.groupRates.health.settings.action') }}
+        </Button>
+        <Button variant="secondary" class="h-11 gap-2" @click="router.push('/admin/group-rate-campaigns?action=create')">
           <Megaphone class="h-4 w-4" />
           {{ t('admin.groupRates.actions.createCampaign') }}
         </Button>
-        <Button class="h-10 gap-2 shadow-sm" :disabled="isLoading" @click="loadRates">
-          <Loader2 v-if="isLoading" class="h-4 w-4 animate-spin" />
+        <Button class="h-11 gap-2 shadow-sm" :disabled="isLoading || isSyncingUpstream" @click="refreshGroupRates">
+          <Loader2 v-if="isLoading || isSyncingUpstream" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
           {{ t('admin.groupRates.actions.refresh') }}
         </Button>
@@ -753,6 +1258,16 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     <div v-if="errorKey" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
       <span>{{ t(errorKey) }}</span>
+    </div>
+
+    <div v-if="dispatchErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
+      <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+      <span>{{ t(dispatchErrorKey) }}</span>
+    </div>
+
+    <div v-if="statusFilter === 'mapped' && healthSummaryErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-warning/20 bg-warning/10 p-4 text-sm text-warning">
+      <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+      <span>{{ t(healthSummaryErrorKey) }}</span>
     </div>
 
     <div id="group-rates-panel" class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-sm" role="tabpanel">
@@ -770,43 +1285,74 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
 
       <div v-else class="flex-1 overflow-auto">
-        <table class="w-full min-w-[980px] text-left text-sm relative">
+        <table :class="['relative w-full text-sm', statusFilter === 'mapped' ? 'min-w-[1160px]' : 'min-w-[1080px]']">
           <thead class="sticky top-0 z-10 border-b border-border/50 bg-surface-elevated/90 backdrop-blur-sm">
             <tr>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.groupName') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
+              <th class="px-6 py-3 font-medium text-muted-foreground">
+                {{ t(statusFilter === 'mapped' ? 'admin.groupRates.fields.upstreamGroup' : 'admin.groupRates.fields.groupName') }}
+              </th>
+              <th v-if="statusFilter === 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">
+                {{ t('admin.groupRates.fields.downstreamGroup') }}
+              </th>
+              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
+              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
+              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.delta') }}</th>
+              <th v-if="statusFilter === 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.health') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.updatedAt') }}</th>
+              <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.dispatch') }}</th>
               <th class="px-6 py-3 text-right font-medium text-muted-foreground">{{ t('admin.groupRates.fields.actions') }}</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-border/50">
             <tr v-for="rate in filteredRates" :key="`${rate.siteId}-${rate.groupName}-${rate.platform ?? 'all'}`" class="transition-colors hover:bg-surface/30">
               <td class="px-4 py-2.5">
-                <div class="font-medium text-foreground">{{ rate.siteName }}</div>
+                <a
+                  v-if="statusFilter === 'mapped' && siteURLForRate(rate)"
+                  :href="siteURLForRate(rate)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="inline-flex items-center gap-1.5 font-medium text-foreground transition-colors hover:text-primary hover:underline focus-visible:rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  :title="siteURLForRate(rate)"
+                >
+                  <span>{{ rate.siteName }}</span>
+                </a>
+                <div v-else class="font-medium text-foreground">{{ rate.siteName }}</div>
               </td>
               <td class="px-4 py-2.5">
-                <div class="flex items-center gap-1.5">
+                <div class="flex items-center justify-center gap-1.5">
                   <span class="font-medium text-foreground">{{ rate.groupName }}</span>
+                  <span v-if="statusFilter === 'mapped'" class="shrink-0 font-semibold tabular-nums text-foreground">
+                    {{ formatMultiplier(rate.currentMultiplier) }}
+                  </span>
                   <span v-if="rate.deleted" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">{{ t('admin.groupRates.status.deleted') }}</span>
-                  <span v-else-if="isRealConnected(rate)" class="inline-flex rounded-md border border-emerald-500/20 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-300">{{ t('admin.groupRates.status.mapped') }}</span>
-                  <span v-if="!rate.deleted && isPricingMapped(rate)" class="inline-flex rounded-md border border-amber-500/20 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-amber-700 dark:text-amber-300">{{ t('admin.groupRates.status.pricingMapped') }}</span>
                 </div>
               </td>
-              <td class="px-4 py-2.5">
+              <td v-if="statusFilter === 'mapped'" class="px-4 py-2.5">
+                <div v-if="downstreamGroupsForRate(rate).length" class="flex flex-col items-center gap-1.5">
+                  <div
+                    v-for="group in downstreamGroupsForRate(rate)"
+                    :key="group.key"
+                    class="flex items-center justify-center gap-1.5 whitespace-nowrap text-foreground"
+                  >
+                    <span class="font-medium">{{ group.name }}</span>
+                    <span class="font-semibold tabular-nums">{{ formatMultiplier(group.multiplier) }}</span>
+                  </div>
+                </div>
+                <span v-else class="text-muted-foreground">{{ t('admin.groupRates.common.placeholder') }}</span>
+              </td>
+              <td v-if="statusFilter !== 'mapped'" class="px-4 py-2.5">
                 <span :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', typeClasses(rate.type)]">
                   {{ typeLabel(rate.type) }}
                 </span>
               </td>
-              <td class="px-4 py-2.5">
+              <td v-if="statusFilter !== 'mapped'" class="px-4 py-2.5">
                 <span :class="['inline-flex rounded-md border px-2 py-1 text-xs font-semibold uppercase tracking-wider', platformClasses(rate.platform)]">
                   {{ platformLabel(rate.platform) }}
                 </span>
               </td>
-              <td class="px-4 py-2.5 tabular-nums">
+              <td v-if="statusFilter !== 'mapped'" class="px-4 py-2.5 tabular-nums">
                 <div class="font-semibold text-foreground">{{ formatMultiplier(rate.currentMultiplier) }}</div>
                 <div v-if="rate.upstreamMultiplier != null" class="mt-0.5 text-[11px] text-muted-foreground">
                   {{ t('admin.groupRates.fields.multiplierFormula', {
@@ -829,20 +1375,104 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   {{ formatDelta(rate.delta) }}
                 </button>
               </td>
+              <td v-if="statusFilter === 'mapped'" class="px-4 py-2.5 text-center">
+                <div class="mx-auto flex min-w-[260px] items-center justify-center gap-3">
+                  <span
+                    :class="[
+                      'w-[68px] whitespace-nowrap rounded-sm text-right text-xs font-semibold transition-all duration-150',
+                      healthStatusClasses(rate),
+                      isHealthStatusFlashing(rate) ? 'animate-pulse ring-2 ring-current/40 ring-offset-2 ring-offset-background' : '',
+                    ]"
+                  >
+                    {{ healthStatusLabel(rate) }}
+                  </span>
+                  <div :class="['flex h-6 items-center gap-1', healthSummaryForRate(rate)?.stale ? 'opacity-80' : '']">
+                    <Tooltip
+                      v-for="(event, index) in healthSlotsForRate(rate)"
+                      :key="event?.id ?? `empty-${index}`"
+                      :text="healthCycleTooltip(event)"
+                      wide
+                    >
+                      <span
+                        :class="['block h-5 w-2.5 rounded-[3px] transition-colors', healthBarClasses(event, healthSummaryForRate(rate)?.stale ?? false)]"
+                      />
+                    </Tooltip>
+                  </div>
+                  <span class="w-9 text-left text-xs font-semibold tabular-nums text-muted-foreground">
+                    {{ formatHealthSuccessRate(rate) }}
+                  </span>
+                </div>
+              </td>
               <td class="px-4 py-2.5 text-muted-foreground tabular-nums">{{ formatDateTime(rate.updatedAt) }}</td>
-              <td class="px-4 py-2.5 text-right">
-                <div v-if="!rate.deleted" class="flex justify-end gap-2">
-                  <Button
+              <td class="px-4 py-2.5 text-center">
+                <button
+                  v-if="supportsDispatch(rate)"
+                  type="button"
+                  role="switch"
+                  :aria-checked="isDispatchEnabledForRate(rate)"
+                  :aria-label="dispatchStatusLabel(rate)"
+                  :title="dispatchStatusLabel(rate)"
+                  :disabled="isDispatchUpdating(rate) || isLoadingDispatchAccounts || !hasDispatchState(rate)"
+                  :class="[
+                    'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+                    isDispatchUpdating(rate) || isLoadingDispatchAccounts
+                      ? 'cursor-wait opacity-70'
+                      : isDispatchUnavailable(rate)
+                        ? 'cursor-not-allowed opacity-50'
+                        : 'cursor-pointer',
+                    isDispatchEnabledForRate(rate)
+                      ? 'border-emerald-500/40 bg-emerald-500'
+                      : 'border-border/70 bg-muted hover:bg-muted/80',
+                  ]"
+                  @click="toggleDispatch(rate)"
+                >
+                  <span
+                    :class="[
+                      'flex h-4 w-4 items-center justify-center rounded-full bg-white text-muted-foreground shadow-sm transition-transform duration-200',
+                      isDispatchEnabledForRate(rate) ? 'translate-x-5' : 'translate-x-1',
+                    ]"
+                  >
+                    <Loader2 v-if="isDispatchUpdating(rate) || isLoadingDispatchAccounts" class="h-3 w-3 animate-spin" />
+                  </span>
+                </button>
+                <span v-else class="text-muted-foreground">{{ t('admin.groupRates.common.placeholder') }}</span>
+              </td>
+              <td class="px-4 py-2.5 text-center">
+                <div v-if="!rate.deleted" class="flex justify-center gap-2">
+                  <Tooltip v-if="isRealConnected(rate)" :text="canProbeHealthRate(rate) ? t('admin.groupRates.health.probe.action') : t('admin.groupRates.health.probe.disabled')">
+                    <button
+                      type="button"
+                      class="flex h-8 w-8 items-center justify-center rounded-md border border-amber-500/30 bg-amber-500/10 text-amber-600 transition-colors hover:border-amber-500/50 hover:bg-amber-500/15 disabled:cursor-not-allowed disabled:opacity-45 dark:text-amber-400"
+                      :aria-label="t('admin.groupRates.health.probe.action')"
+                      :disabled="!canProbeHealthRate(rate) || isHealthProbeRunning(rate)"
+                      @click="probeHealthRate(rate)"
+                    >
+                      <Loader2 v-if="isHealthProbeRunning(rate)" class="h-4 w-4 animate-spin" />
+                      <Zap v-else class="h-4 w-4" />
+                    </button>
+                  </Tooltip>
+                  <button
                     v-if="isRealConnected(rate)"
-                    variant="destructive"
-                    size="sm"
-                    class="gap-1.5"
+                    type="button"
+                    class="flex h-8 w-8 items-center justify-center rounded-md border border-border/60 bg-surface text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/10 hover:text-primary disabled:opacity-50"
+                    :title="t('admin.groupRates.connectionEdit.action')"
+                    :aria-label="t('admin.groupRates.connectionEdit.action')"
+                    :disabled="isActionLoading || isUpdatingConnectionGroups"
+                    @click="openConnectionEditor(rate)"
+                  >
+                    <Pencil class="h-4 w-4" />
+                  </button>
+                  <button
+                    v-if="isRealConnected(rate)"
+                    type="button"
+                    class="flex h-8 w-8 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-500 transition-colors hover:border-red-500/50 hover:bg-red-500/15 disabled:opacity-50"
+                    :title="t('admin.groupRates.disconnect.action')"
+                    :aria-label="t('admin.groupRates.disconnect.action')"
                     :disabled="isActionLoading || isDisconnecting"
                     @click="openDisconnect(rate)"
                   >
-                    <X class="h-3.5 w-3.5" />
-                    {{ t('admin.groupRates.disconnect.action') }}
-                  </Button>
+                    <Trash2 class="h-4 w-4" />
+                  </button>
                   <Button
                     v-else
                     variant="secondary"
@@ -879,6 +1509,78 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
     </div>
 
+    <div v-if="isHealthSettingsOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+      <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-health-settings-title" tabindex="-1" class="flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-xl">
+        <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
+          <div>
+            <h2 id="group-rate-health-settings-title" class="text-xl font-semibold text-foreground">{{ t('admin.groupRates.health.settings.title') }}</h2>
+            <p class="mt-2 text-sm text-muted-foreground">{{ t('admin.groupRates.health.settings.description') }}</p>
+          </div>
+          <button class="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground" :disabled="isSavingHealthSettings" @click="closeHealthSettings">
+            <X class="h-5 w-5" />
+            <span class="sr-only">{{ t('admin.groupRates.actions.cancel') }}</span>
+          </button>
+        </div>
+
+        <div v-if="isLoadingHealthSettings" class="flex min-h-[320px] items-center justify-center text-muted-foreground">
+          <Loader2 class="mr-2 h-5 w-5 animate-spin" />
+          {{ t('admin.groupRates.health.settings.loading') }}
+        </div>
+
+        <div v-else-if="healthSettingsDraft" class="min-h-0 flex-1 overflow-y-auto">
+          <div class="p-6">
+            <div class="flex items-center justify-between gap-6">
+              <div>
+                <div class="font-medium text-foreground">{{ t('admin.groupRates.health.settings.enabled') }}</div>
+                <div class="mt-1 text-sm text-muted-foreground">{{ t('admin.groupRates.health.settings.enabledHint') }}</div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                :aria-checked="healthSettingsDraft.enabled"
+                :class="[
+                  'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                  healthSettingsDraft.enabled ? 'border-emerald-500/40 bg-emerald-500' : 'border-border/70 bg-muted',
+                ]"
+                @click="healthSettingsDraft.enabled = !healthSettingsDraft.enabled"
+              >
+                <span :class="['h-4 w-4 rounded-full bg-white shadow-sm transition-transform', healthSettingsDraft.enabled ? 'translate-x-5' : 'translate-x-1']" />
+              </button>
+            </div>
+
+            <div class="mt-6 grid gap-4 sm:grid-cols-3">
+              <label class="block">
+                <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.interval') }}</span>
+                <input v-model.number="healthSettingsDraft.probeIntervalSeconds" type="number" min="10" max="86400" step="1" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30" />
+              </label>
+              <label class="block">
+                <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.failureThreshold') }}</span>
+                <input v-model.number="healthSettingsDraft.failureThreshold" type="number" min="1" max="10" step="1" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30" />
+              </label>
+              <label class="block">
+                <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.defaultModel') }}</span>
+                <Input v-model="healthSettingsDraft.defaultModel" :placeholder="t('admin.groupRates.health.settings.modelPlaceholder')" autocomplete="off" />
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="border-t border-border/50 p-6">
+          <div v-if="healthSettingsErrorKey" class="mb-4 flex items-start gap-2 text-sm text-destructive">
+            <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{{ t(healthSettingsErrorKey) }}</span>
+          </div>
+          <div class="flex justify-end gap-3">
+            <Button variant="secondary" :disabled="isSavingHealthSettings" @click="closeHealthSettings">{{ t('admin.groupRates.actions.cancel') }}</Button>
+            <Button :disabled="isSavingHealthSettings || isLoadingHealthSettings || !healthSettingsDraft" @click="saveHealthSettings">
+              <Loader2 v-if="isSavingHealthSettings" class="mr-2 h-4 w-4 animate-spin" />
+              {{ t('admin.groupRates.health.settings.save') }}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="isHistoryOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-history-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-4xl overflow-hidden overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">
         <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
@@ -911,7 +1613,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
 
         <div v-else class="max-h-[60vh] overflow-auto">
-          <table class="w-full min-w-[680px] text-left text-sm">
+          <table class="w-full min-w-[680px] text-sm">
             <thead class="sticky top-0 border-b border-border/50 bg-surface-elevated">
               <tr>
                 <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
@@ -927,7 +1629,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <tr v-for="(row, index) in history" :key="historyRowKey(row, index)" class="transition-colors hover:bg-surface/30">
                 <td class="px-6 py-4 font-medium text-foreground">{{ row.siteName }}</td>
                 <td class="px-6 py-4 text-foreground">
-                  <div class="flex items-center gap-1.5">
+                  <div class="flex items-center justify-center gap-1.5">
                     <span>{{ row.groupName }}</span>
                     <span v-if="row.deleted" class="inline-flex rounded-md border border-red-500/20 bg-red-500/10 px-1.5 py-0.5 text-[10px] font-semibold text-red-500">{{ t('admin.groupRates.status.deleted') }}</span>
                   </div>
@@ -970,14 +1672,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         <form class="space-y-5 p-6" @submit.prevent="submitTypeEditor">
           <label class="block space-y-2">
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.edit.typeLabel') }}</span>
-            <select
-              v-model="editTypeValue"
-              class="h-11 w-full rounded-xl border border-border/70 bg-surface px-4 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-              :disabled="isActionLoading"
-            >
+            <Select v-model="editTypeValue" :disabled="isActionLoading">
               <option value="">{{ t('admin.groupRates.edit.typePlaceholder') }}</option>
               <option v-for="type in editTypeOptions" :key="type" :value="type">{{ typeLabel(type) }}</option>
-            </select>
+            </Select>
           </label>
 
           <div class="flex justify-end gap-2">
@@ -1080,40 +1778,22 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <!-- sub2api admin：分组类型选择（仅在无法自动检测时显示） -->
           <div v-if="needsGroupTypeSelection" class="space-y-2">
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.groupTypeLabel') }}</span>
-            <div class="relative">
-              <select
-                v-model="selectedGroupType"
-                class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none appearance-none transition-all focus:border-primary focus:ring-1 focus:ring-primary"
-                :disabled="isActionLoading"
-              >
-                <option value="">{{ t('admin.groupRates.connect.groupTypePlaceholder') }}</option>
-                <option value="openai">{{ t('admin.groupRates.connect.groupTypeOpenai') }}</option>
-                <option value="anthropic">{{ t('admin.groupRates.connect.groupTypeAnthropic') }}</option>
-                <option value="gemini">{{ t('admin.groupRates.connect.groupTypeGemini') }}</option>
-                <option value="antigravity">{{ t('admin.groupRates.connect.groupTypeAntigravity') }}</option>
-              </select>
-              <div class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                <ChevronDown class="h-3.5 w-3.5" />
-              </div>
-            </div>
+            <Select v-model="selectedGroupType" :disabled="isActionLoading">
+              <option value="">{{ t('admin.groupRates.connect.groupTypePlaceholder') }}</option>
+              <option value="openai">{{ t('admin.groupRates.connect.groupTypeOpenai') }}</option>
+              <option value="anthropic">{{ t('admin.groupRates.connect.groupTypeAnthropic') }}</option>
+              <option value="gemini">{{ t('admin.groupRates.connect.groupTypeGemini') }}</option>
+              <option value="antigravity">{{ t('admin.groupRates.connect.groupTypeAntigravity') }}</option>
+            </Select>
           </div>
 
           <!-- new-api admin：渠道类型选择 -->
           <div v-if="needsChannelTypeSelection" class="space-y-2">
             <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connect.channelTypeLabel') }}</span>
-            <div class="relative">
-              <select
-                v-model.number="selectedChannelType"
-                class="h-10 w-full rounded-xl border border-border/50 bg-surface px-3 pr-8 text-sm text-foreground outline-none appearance-none transition-all focus:border-primary focus:ring-1 focus:ring-primary"
-                :disabled="isActionLoading"
-              >
-                <option :value="0">{{ t('admin.groupRates.connect.channelTypePlaceholder') }}</option>
-                <option v-for="ct in filteredChannelTypes" :key="ct.id" :value="ct.id">{{ ct.name }}</option>
-              </select>
-              <div class="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground">
-                <ChevronDown class="h-3.5 w-3.5" />
-              </div>
-            </div>
+            <Select v-model.number="selectedChannelType" :disabled="isActionLoading">
+              <option :value="0">{{ t('admin.groupRates.connect.channelTypePlaceholder') }}</option>
+              <option v-for="ct in filteredChannelTypes" :key="ct.id" :value="ct.id">{{ ct.name }}</option>
+            </Select>
           </div>
 
           <div v-if="connectMode === 'bind'" class="space-y-2">
@@ -1168,21 +1848,17 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <ServerCog class="h-4 w-4 text-primary" />
               {{ t('admin.groupRates.connect.bindSelectAdminGroup') }}
             </label>
-            <div class="relative">
-              <select
-                id="existing-admin-group"
-                :value="selectedAdminGroupId"
-                class="h-11 w-full appearance-none rounded-lg border border-border/60 bg-surface px-3 pr-9 text-sm text-foreground outline-none transition focus:border-primary focus:ring-1 focus:ring-primary"
-                :disabled="isActionLoading || isLoadingAdminResources"
-                @change="handleAdminGroupChange"
-              >
-                <option value="">{{ t('admin.groupRates.connect.bindAdminGroupPlaceholder') }}</option>
-                <option v-for="group in ownGroups" :key="group.id" :value="group.id">
-                  {{ group.groupName }} · {{ formatMultiplier(group.multiplier) }}
-                </option>
-              </select>
-              <ChevronDown class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            </div>
+            <Select
+              id="existing-admin-group"
+              :value="selectedAdminGroupId"
+              :disabled="isActionLoading || isLoadingAdminResources"
+              @change="handleAdminGroupChange"
+            >
+              <option value="">{{ t('admin.groupRates.connect.bindAdminGroupPlaceholder') }}</option>
+              <option v-for="group in ownGroups" :key="group.id" :value="group.id">
+                {{ group.groupName }} · {{ formatMultiplier(group.multiplier) }}
+              </option>
+            </Select>
           </div>
 
           <div v-if="connectMode === 'bind' && selectedAdminGroupId" class="space-y-2">
@@ -1283,6 +1959,65 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
     </div>
 
+    <div v-if="connectionEditingRate" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
+      <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-connection-edit-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-2xl overflow-y-auto overscroll-contain rounded-lg border border-border/60 bg-card shadow-xl">
+        <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
+          <div>
+            <h2 id="group-rate-connection-edit-title" class="text-xl font-semibold text-foreground">
+              {{ t('admin.groupRates.connectionEdit.title', { site: connectionEditingRate.siteName, group: connectionEditingRate.groupName }) }}
+            </h2>
+            <p class="mt-2 text-sm text-muted-foreground">{{ t('admin.groupRates.connectionEdit.description') }}</p>
+          </div>
+          <button type="button" class="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground" :disabled="isUpdatingConnectionGroups" :aria-label="t('admin.groupRates.actions.cancel')" @click="closeConnectionEditor">
+            <X class="h-5 w-5" />
+          </button>
+        </div>
+
+        <form class="space-y-5 p-6" @submit.prevent="submitConnectionEditor">
+          <div class="rounded-lg border border-border/60 bg-surface px-4 py-3">
+            <div class="flex items-center justify-between gap-4 text-sm">
+              <span class="text-muted-foreground">{{ t('admin.groupRates.fields.upstreamGroup') }}</span>
+              <span class="font-medium text-foreground">{{ connectionEditingRate.groupName }} {{ formatMultiplier(connectionEditingRate.currentMultiplier) }}</span>
+            </div>
+          </div>
+
+          <div class="space-y-2">
+            <span class="text-sm font-medium text-foreground">{{ t('admin.groupRates.connectionEdit.ownGroupLabel') }}</span>
+            <div class="max-h-72 divide-y divide-border/30 overflow-auto rounded-lg border border-border/60 bg-surface">
+              <label v-for="group in ownGroups" :key="group.id" class="flex cursor-pointer items-center gap-3 px-4 py-3 transition-colors hover:bg-surface-elevated">
+                <input
+                  type="checkbox"
+                  :checked="editConnectionGroups.includes(group.id)"
+                  class="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                  :disabled="isUpdatingConnectionGroups"
+                  @change="toggleEditConnectionGroup(group.id)"
+                />
+                <span class="min-w-0 flex-1 truncate text-sm font-medium text-foreground">{{ group.groupName }}</span>
+                <span v-if="group.platform" class="inline-flex rounded-md border border-border/50 bg-surface-elevated px-1.5 py-0.5 text-[10px] font-semibold uppercase text-muted-foreground">{{ group.platform }}</span>
+                <span class="shrink-0 text-xs tabular-nums text-muted-foreground">{{ formatMultiplier(group.multiplier) }}</span>
+              </label>
+              <div v-if="ownGroups.length === 0" class="px-4 py-8 text-center text-sm text-muted-foreground">{{ t('admin.groupRates.connectionEdit.empty') }}</div>
+            </div>
+          </div>
+
+          <div v-if="editConnectionError" class="flex items-start gap-3 rounded-lg border border-warning/20 bg-warning/10 p-3 text-sm text-warning">
+            <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+            <span>{{ editConnectionError }}</span>
+          </div>
+
+          <div class="flex justify-end gap-2">
+            <Button type="button" variant="secondary" :disabled="isUpdatingConnectionGroups" @click="closeConnectionEditor">
+              {{ t('admin.groupRates.actions.cancel') }}
+            </Button>
+            <Button type="submit" class="gap-2" :disabled="isUpdatingConnectionGroups || editConnectionGroups.length === 0">
+              <Loader2 v-if="isUpdatingConnectionGroups" class="h-4 w-4 animate-spin" />
+              {{ t('admin.groupRates.actions.confirm') }}
+            </Button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div v-if="disconnectingRate" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
       <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-disconnect-title" tabindex="-1" class="max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto overscroll-contain rounded-xl border border-border/50 bg-card shadow-xl">
         <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
@@ -1303,9 +2038,38 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
 
         <div class="space-y-4 p-6">
+          <div class="space-y-2">
+            <div class="flex items-center justify-between gap-3">
+              <div>
+                <p class="text-sm font-medium text-foreground">{{ t('admin.groupRates.disconnect.downstreamGroups') }}</p>
+                <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.groupRates.disconnect.downstreamGroupsHint') }}</p>
+              </div>
+              <span class="shrink-0 text-xs text-muted-foreground">{{ disconnectTargetCount }}/{{ disconnectTargets.length }}</span>
+            </div>
+            <div v-if="disconnectTargets.length" class="max-h-48 space-y-2 overflow-y-auto rounded-lg border border-border/60 bg-surface p-3">
+              <label
+                v-for="target in disconnectTargets"
+                :key="target.key"
+                class="flex cursor-pointer items-start gap-3 rounded-md px-2 py-2 transition-colors hover:bg-surface-elevated"
+              >
+                <input
+                  v-model="disconnectSelectedTargets"
+                  type="checkbox"
+                  :value="target.key"
+                  class="mt-0.5 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+                  :disabled="isDisconnecting"
+                />
+                <span class="min-w-0 text-sm text-foreground">
+                  <span class="block truncate">{{ target.name }}</span>
+                  <span v-if="target.accountName" class="mt-0.5 block truncate text-xs text-muted-foreground">{{ target.accountName }}</span>
+                </span>
+              </label>
+            </div>
+            <p v-else class="rounded-lg border border-warning/20 bg-warning/10 p-3 text-xs text-warning">{{ t('admin.groupRates.disconnect.noTargets') }}</p>
+          </div>
+
           <div class="space-y-3">
             <label
-              v-if="disconnectConnection?.canDeleteRemote !== false"
               class="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
               :class="disconnectMode === 'unlink'
                 ? 'border-primary bg-primary/5'
@@ -1325,6 +2089,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </label>
 
             <label
+              v-if="disconnectCanDeleteRemote"
               class="flex cursor-pointer items-start gap-3 rounded-xl border p-4 transition-colors"
               :class="disconnectMode === 'full'
                 ? 'border-red-500/50 bg-red-500/5'
@@ -1367,7 +2132,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <Button
               :variant="disconnectMode === 'full' ? 'destructive' : 'default'"
               class="gap-2"
-              :disabled="isDisconnecting"
+              :disabled="isDisconnecting || disconnectTargetCount === 0"
               @click="submitDisconnect"
             >
               <Loader2 v-if="isDisconnecting" class="h-4 w-4 animate-spin" />

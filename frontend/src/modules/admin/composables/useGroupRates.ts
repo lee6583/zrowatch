@@ -1,6 +1,45 @@
-import { ref } from 'vue'
+import { ref, watch } from 'vue'
 import { listGroupRateHistory, listGroupRates, updateGroupRateType } from '../api/groupRates'
 import type { GroupRate, GroupRateHistoryQuery, GroupRateHistoryRow, GroupRateSort, GroupRateStatusCounts, GroupRateStatusFilter } from '../types/groupRates'
+
+const groupRatesFilterStorageKey = 'transit-hub:admin:group-rates-filters.v1'
+
+type StoredGroupRatesFilters = {
+  search?: string
+  typeFilter?: string
+  platformFilter?: string
+  statusFilter?: GroupRateStatusFilter
+  sortMode?: GroupRateSort
+}
+
+const isGroupRateStatusFilter = (value: unknown): value is GroupRateStatusFilter => (
+  value === 'all' || value === 'mapped' || value === 'unmapped' || value === 'deleted'
+)
+
+const isGroupRateSort = (value: unknown): value is GroupRateSort => (
+  value === 'multiplierAsc' || value === 'multiplierDesc' || value === 'siteNameAsc' || value === 'groupNameAsc'
+)
+
+const readStoredGroupRatesFilters = (): StoredGroupRatesFilters => {
+  if (typeof window === 'undefined') return {}
+  try {
+    const raw = window.localStorage.getItem(groupRatesFilterStorageKey)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as StoredGroupRatesFilters
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+const writeStoredGroupRatesFilters = (filters: StoredGroupRatesFilters): void => {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(groupRatesFilterStorageKey, JSON.stringify(filters))
+  } catch {
+    // Storage may be unavailable in private browsing or restricted environments.
+  }
+}
 
 export const useGroupRates = () => {
   const rates = ref<GroupRate[]>([])
@@ -11,11 +50,12 @@ export const useGroupRates = () => {
   const totalPages = ref(1)
   const types = ref<string[]>([])
   const platforms = ref<string[]>([])
-  const search = ref('')
-  const typeFilter = ref('')
-  const platformFilter = ref('')
-  const statusFilter = ref<GroupRateStatusFilter>('all')
-  const sortMode = ref<GroupRateSort>('multiplierAsc')
+  const storedFilters = readStoredGroupRatesFilters()
+  const search = ref(typeof storedFilters.search === 'string' ? storedFilters.search : '')
+  const typeFilter = ref(typeof storedFilters.typeFilter === 'string' ? storedFilters.typeFilter : '')
+  const platformFilter = ref(typeof storedFilters.platformFilter === 'string' ? storedFilters.platformFilter : '')
+  const statusFilter = ref<GroupRateStatusFilter>(isGroupRateStatusFilter(storedFilters.statusFilter) ? storedFilters.statusFilter : 'all')
+  const sortMode = ref<GroupRateSort>(isGroupRateSort(storedFilters.sortMode) ? storedFilters.sortMode : 'multiplierAsc')
   const statusCounts = ref<GroupRateStatusCounts>({ all: 0, mapped: 0, unmapped: 0, deleted: 0 })
   const serverSupportsStatusFilters = ref(false)
   const isLoading = ref(false)
@@ -24,6 +64,16 @@ export const useGroupRates = () => {
   const errorKey = ref<string | null>(null)
   const historyErrorKey = ref<string | null>(null)
   let ratesRequestId = 0
+
+  watch([search, typeFilter, platformFilter, statusFilter, sortMode], () => {
+    writeStoredGroupRatesFilters({
+      search: search.value,
+      typeFilter: typeFilter.value,
+      platformFilter: platformFilter.value,
+      statusFilter: statusFilter.value,
+      sortMode: sortMode.value,
+    })
+  })
 
   const loadRates = async () => {
     const requestId = ++ratesRequestId

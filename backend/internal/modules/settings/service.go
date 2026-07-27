@@ -46,7 +46,7 @@ var (
 
 type Service struct {
 	client            *http.Client
-	repository        *Repository
+	repository        settingsRepository
 	accounts          AdminAccountResolver
 	OnStrategyChanged func(StrategySettings)
 
@@ -58,6 +58,15 @@ type Service struct {
 	smtpSender smtpSender
 	// emailTemplateRepo 是邮件模板存储层窄接口，测试通过内存 fake 覆盖 workspace 隔离和限制规则。
 	emailTemplateRepo emailTemplateRepository
+}
+
+type settingsRepository interface {
+	EnsureSchema(ctx context.Context) error
+	GetFirstStrategy(ctx context.Context) (StrategySettings, error)
+	GetStrategy(ctx context.Context, userID string, adminAccountID string) (StrategySettings, error)
+	SaveStrategy(ctx context.Context, userID string, adminAccountID string, settings StrategySettings) error
+	GetNotificationChannels(ctx context.Context, userID string, adminAccountID string) (NotificationChannelSettings, error)
+	SaveNotificationChannels(ctx context.Context, userID string, adminAccountID string, settings NotificationChannelSettings) error
 }
 
 type AdminAccountResolver interface {
@@ -117,6 +126,13 @@ func (s *Service) GetStrategy(ctx context.Context, userID string) (StrategySetti
 	if err != nil {
 		return StrategySettings{}, err
 	}
+	return s.repository.GetStrategy(ctx, userID, adminAccountID)
+}
+
+// GetStrategyForWorkspace returns strategy settings for the workspace that owns
+// a background job. It must not depend on whichever workspace is currently
+// selected in the dashboard.
+func (s *Service) GetStrategyForWorkspace(ctx context.Context, userID string, adminAccountID string) (StrategySettings, error) {
 	return s.repository.GetStrategy(ctx, userID, adminAccountID)
 }
 
@@ -270,9 +286,19 @@ func (s *Service) SendToBots(ctx context.Context, userID string, botIDs []string
 		log.Printf("[settings] 当前 admin workspace 缺失 user_id=%s err=%v", userID, err)
 		return
 	}
+	s.SendToBotsForWorkspace(ctx, userID, adminAccountID, botIDs, message)
+}
+
+// SendToBotsForWorkspace sends through channels stored in the workspace that
+// produced the event. Background syncs cannot safely resolve this through the
+// dashboard's currently selected workspace.
+func (s *Service) SendToBotsForWorkspace(ctx context.Context, userID string, adminAccountID string, botIDs []string, message string) {
+	if len(botIDs) == 0 || message == "" {
+		return
+	}
 	channels, err := s.repository.GetNotificationChannels(ctx, userID, adminAccountID)
 	if err != nil {
-		log.Printf("[settings] 加载通知渠道配置失败 user_id=%s err=%v", userID, err)
+		log.Printf("[settings] 加载通知渠道配置失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		return
 	}
 
@@ -281,26 +307,33 @@ func (s *Service) SendToBots(ctx context.Context, userID string, botIDs []string
 		idSet[id] = struct{}{}
 	}
 
+	matched := 0
 	for _, bot := range channels.Dingtalk {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
+			matched++
 			if err := s.sendDingtalk(ctx, bot.Webhook, bot.Secret, message); err != nil {
 				log.Printf("[settings] 钉钉通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
 	}
 	for _, bot := range channels.Feishu {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
+			matched++
 			if err := s.sendFeishu(ctx, bot.Webhook, bot.Secret, message); err != nil {
 				log.Printf("[settings] 飞书通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
 	}
 	for _, bot := range channels.Telegram {
-		if _, ok := idSet[bot.ID]; ok {
+		if _, ok := idSet[bot.ID]; ok && bot.Enabled {
+			matched++
 			if err := s.sendTelegram(ctx, bot.BotToken, bot.ChatID, bot.ProxyURL, message); err != nil {
 				log.Printf("[settings] Telegram 通知发送失败 bot=%s err=%v", bot.Name, err)
 			}
 		}
+	}
+	if matched == 0 {
+		log.Printf("[settings] 未找到已启用且匹配的通知机器人 user_id=%s admin_account_id=%s selected_bot_ids=%v", userID, adminAccountID, botIDs)
 	}
 }
 
@@ -318,7 +351,21 @@ func (s *Service) sendDingtalk(ctx context.Context, webhook string, secret strin
 			"content": message,
 		},
 	}
-	return s.postJSON(ctx, signedWebhook, body)
+	responseBody, err := s.postJSONWithClientResponse(ctx, s.client, signedWebhook, body)
+	if err != nil {
+		return err
+	}
+	var result struct {
+		ErrCode int64  `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.Unmarshal(responseBody, &result); err != nil {
+		return fmt.Errorf("%w: invalid DingTalk response: %v", ErrSendNotificationFailed, err)
+	}
+	if result.ErrCode != 0 {
+		return fmt.Errorf("%w: errcode=%d errmsg=%s", ErrSendNotificationFailed, result.ErrCode, result.ErrMsg)
+	}
+	return nil
 }
 
 func (s *Service) sendFeishu(ctx context.Context, webhook string, secret string, message string) error {
@@ -356,26 +403,34 @@ func (s *Service) postJSON(ctx context.Context, endpoint string, payload any) er
 }
 
 func (s *Service) postJSONWithClient(ctx context.Context, client *http.Client, endpoint string, payload any) error {
+	_, err := s.postJSONWithClientResponse(ctx, client, endpoint, payload)
+	return err
+}
+
+func (s *Service) postJSONWithClientResponse(ctx context.Context, client *http.Client, endpoint string, payload any) ([]byte, error) {
 	body, err := json.Marshal(payload)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	response, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrSendNotificationFailed, err)
+		return nil, fmt.Errorf("%w: %v", ErrSendNotificationFailed, err)
 	}
 	defer response.Body.Close()
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		responseBody, _ := io.ReadAll(io.LimitReader(response.Body, 512))
-		return fmt.Errorf("%w: status=%d body=%s", ErrSendNotificationFailed, response.StatusCode, strings.TrimSpace(string(responseBody)))
+	responseBody, readErr := io.ReadAll(io.LimitReader(response.Body, 64*1024))
+	if readErr != nil {
+		return nil, fmt.Errorf("%w: read response body: %v", ErrSendNotificationFailed, readErr)
 	}
-	return nil
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("%w: status=%d body=%s", ErrSendNotificationFailed, response.StatusCode, strings.TrimSpace(string(responseBody)))
+	}
+	return responseBody, nil
 }
 
 func (s *Service) telegramClient(proxyURL string) *http.Client {

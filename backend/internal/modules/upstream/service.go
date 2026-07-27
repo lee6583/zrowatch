@@ -441,7 +441,11 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	site.Platform = result.Platform
 	site.Session = &result.Session
 	site.Metrics = result.Metrics
-	site.Status = StatusConnected
+	if site.BalanceSuspended {
+		site.Status = StatusDisabled
+	} else {
+		site.Status = StatusConnected
+	}
 	site.ErrorKey = nil
 	site.LastSyncedAt = &now
 
@@ -531,7 +535,11 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 		site.Platform = result.Platform
 		site.Session = &result.Session
 		site.Metrics = result.Metrics
-		site.Status = StatusConnected
+		if site.BalanceSuspended {
+			site.Status = StatusDisabled
+		} else {
+			site.Status = StatusConnected
+		}
 		site.ErrorKey = nil
 		site.LastSyncedAt = &now
 
@@ -761,8 +769,12 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 		return Response{}, newRequestError(ErrorNotFound, "")
 	}
 
-	// 标记为同步中。
-	site.Status = StatusSyncing
+	// 余额暂停站点仍需继续同步余额，因此保留 disabled 状态，避免页面在轮询时闪回
+	// 「同步中」或「已连接」。
+	wasBalanceSuspended := site.BalanceSuspended
+	if !wasBalanceSuspended {
+		site.Status = StatusSyncing
+	}
 	site.ErrorKey = nil
 	_ = s.setCachedSite(ctx, site)
 	session := *site.Session
@@ -784,14 +796,22 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	oldMetrics := site.Metrics
 
 	if refreshErr != nil {
-		site.Status = StatusError
+		if wasBalanceSuspended || site.BalanceSuspended {
+			site.Status = StatusDisabled
+		} else {
+			site.Status = StatusError
+		}
 		key := errorKey(refreshErr)
 		site.ErrorKey = &key
 	} else {
 		now := time.Now().UnixMilli()
 		site.Session = &refreshedSession
 		site.Metrics = metrics
-		site.Status = StatusConnected
+		if site.BalanceSuspended {
+			site.Status = StatusDisabled
+		} else {
+			site.Status = StatusConnected
+		}
 		site.ErrorKey = nil
 		site.LastSyncedAt = &now
 	}
@@ -1061,22 +1081,62 @@ func (s *Service) GetSite(ctx context.Context, siteID string) (*Site, error) {
 	return s.cache.Get(ctx, siteID)
 }
 
+// SetBalanceSuspended persists the automatic balance protection state. It is
+// intentionally separate from real_connections.status: a balance pause must
+// never look like an unlink operation to mapping and pricing code.
+func (s *Service) SetBalanceSuspended(ctx context.Context, siteID string, suspended bool, reason string) (*Site, error) {
+	site, err := s.cache.Get(ctx, siteID)
+	if err != nil {
+		return nil, err
+	}
+	if site == nil {
+		return nil, newRequestError(ErrorNotFound, "")
+	}
+	updated := *site
+	site = &updated
+
+	if suspended {
+		now := time.Now().UnixMilli()
+		site.BalanceSuspended = true
+		site.BalanceSuspendedAt = &now
+		site.BalancePauseReason = strings.TrimSpace(reason)
+		site.Status = StatusDisabled
+	} else {
+		site.BalanceSuspended = false
+		site.BalanceSuspendedAt = nil
+		site.BalancePauseReason = ""
+		if site.Status == StatusDisabled {
+			site.Status = StatusConnected
+		}
+	}
+	if err := s.saveSite(ctx, site); err != nil {
+		return nil, err
+	}
+	if err := s.setCachedSite(ctx, site); err != nil {
+		return nil, err
+	}
+	return site, nil
+}
+
 func toResponse(site *Site) Response {
 	return Response{
-		ID:                site.ID,
-		UserID:            site.UserID,
-		Name:              site.Name,
-		BaseURL:           site.BaseURL,
-		Platform:          site.Platform,
-		RequestedPlatform: site.RequestedPlatform,
-		Account:           site.Account,
-		Remark:            site.Remark,
-		RechargeRate:      site.RechargeRate,
-		Status:            site.Status,
-		ErrorKey:          site.ErrorKey,
-		Metrics:           site.Metrics,
-		Settings:          site.Settings,
-		LastSyncedAt:      site.LastSyncedAt,
+		ID:                 site.ID,
+		UserID:             site.UserID,
+		Name:               site.Name,
+		BaseURL:            site.BaseURL,
+		Platform:           site.Platform,
+		RequestedPlatform:  site.RequestedPlatform,
+		Account:            site.Account,
+		Remark:             site.Remark,
+		RechargeRate:       site.RechargeRate,
+		Status:             site.Status,
+		BalanceSuspended:   site.BalanceSuspended,
+		BalanceSuspendedAt: site.BalanceSuspendedAt,
+		BalancePauseReason: site.BalancePauseReason,
+		ErrorKey:           site.ErrorKey,
+		Metrics:            site.Metrics,
+		Settings:           site.Settings,
+		LastSyncedAt:       site.LastSyncedAt,
 	}
 }
 

@@ -2,6 +2,7 @@
 import { ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { AlertCircle, Loader2, MessageSquare, Send, X } from 'lucide-vue-next'
+import { Select } from '@/components/ui/select'
 import { getTicket, replyTicket, updateTicketStatus } from '../../api/tickets'
 import AdminAttachmentThumbnail from './AdminAttachmentThumbnail.vue'
 import AdminAttachmentPreviewModal from './AdminAttachmentPreviewModal.vue'
@@ -190,16 +191,16 @@ const statusBadgeClass = (status: string): string => {
                       <span class="rounded-full px-2.5 py-1 text-xs font-medium" :class="statusBadgeClass(detail.status)">
                         {{ t(`admin.tickets.status.${detail.status}`) }}
                       </span>
-                      <select
+                      <Select
                         :value="detail.status"
-                        class="h-7 rounded-md border border-border/50 bg-surface px-1.5 text-xs text-foreground outline-none focus:border-primary"
+                        class="h-7 w-28 text-xs"
                         :disabled="isStatusUpdating"
                         @change="handleStatusChange"
                       >
                         <option v-for="status in statusOptions" :key="status" :value="status">
                           {{ t(`admin.tickets.status.${status}`) }}
                         </option>
-                      </select>
+                      </Select>
                     </div>
                   </div>
                   <div class="grid grid-cols-2 gap-3 text-xs">

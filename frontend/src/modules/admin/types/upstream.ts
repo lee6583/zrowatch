@@ -2,7 +2,7 @@ export type UpstreamPlatform = 'auto' | 'newapi' | 'sub2api'
 
 export type ResolvedUpstreamPlatform = Exclude<UpstreamPlatform, 'auto'>
 
-export type UpstreamStatus = 'connecting' | 'syncing' | 'connected' | 'error'
+export type UpstreamStatus = 'connecting' | 'syncing' | 'connected' | 'disabled' | 'error'
 
 export type UpstreamAuthMode = 'password' | 'token' | 'user_key'
 
@@ -82,6 +82,9 @@ export interface UpstreamSite {
   logo: string
   logoBg: string
   status: UpstreamStatus
+  balanceSuspended?: boolean
+  balanceSuspendedAt?: number | null
+  balancePauseReason?: string
   errorKey: string | null
   metrics: UpstreamMetrics
   settings: SiteSettings
