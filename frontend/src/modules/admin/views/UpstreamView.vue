@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, LayoutGrid, List, RefreshCw, Settings2 } from 'lucide-vue-next'
+import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2 } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Tooltip } from '@/components/ui/tooltip'
@@ -22,8 +22,6 @@ const refreshIntervalSeconds = ref<number | null>(null)
 const remainingSeconds = ref(0)
 let countdownTimer: ReturnType<typeof window.setInterval> | null = null
 const nextRefreshAtStorageKey = 'transit-hub:upstream-next-refresh-at'
-
-const viewMode = ref<'card' | 'list'>('card')
 
 const countdownDisplay = computed(() => {
   if (!refreshIntervalSeconds.value) return t('admin.upstream.refresh.disabled')
@@ -281,30 +279,6 @@ onBeforeUnmount(() => {
       </div>
 
       <div class="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
-        <div class="flex shrink-0 items-center rounded-lg border border-border/50 bg-surface p-1" role="group" :aria-label="t('admin.upstream.viewMode.list')">
-          <button
-            type="button"
-            @click="viewMode = 'list'"
-            :class="{'bg-card shadow-sm text-foreground': viewMode === 'list', 'text-muted-foreground hover:text-foreground': viewMode !== 'list'}"
-            class="rounded-md p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-            :title="t('admin.upstream.viewMode.list')"
-            :aria-label="t('admin.upstream.viewMode.list')"
-            :aria-pressed="viewMode === 'list'"
-          >
-            <List class="w-4 h-4" />
-          </button>
-          <button
-            type="button"
-            @click="viewMode = 'card'"
-            :class="{'bg-card shadow-sm text-foreground': viewMode === 'card', 'text-muted-foreground hover:text-foreground': viewMode !== 'card'}"
-            class="rounded-md p-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-            :title="t('admin.upstream.viewMode.card')"
-            :aria-label="t('admin.upstream.viewMode.card')"
-            :aria-pressed="viewMode === 'card'"
-          >
-            <LayoutGrid class="w-4 h-4" />
-          </button>
-        </div>
         <div class="hidden md:flex h-10 items-center rounded-xl border border-border/50 bg-surface px-3 text-xs text-muted-foreground whitespace-nowrap">
           {{ countdownDisplay }}
         </div>
@@ -320,165 +294,8 @@ onBeforeUnmount(() => {
       </div>
     </div>
 
-    <!-- Cards Grid -->
-    <div v-if="viewMode === 'card'" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-6">
-      <div
-        v-for="site in filteredSites"
-        :key="site.id"
-        class="group relative bg-card border border-border/60 rounded-2xl p-5 hover:border-primary/50 transition-colors shadow-sm hover:shadow-md"
-      >
-        <!-- Sync Progress Overlay -->
-        <div
-          v-if="siteSyncStates.get(site.id)?.phase && siteSyncStates.get(site.id)?.phase !== 'idle'"
-          class="absolute inset-0 z-10 flex flex-col items-center justify-center rounded-2xl backdrop-blur-sm transition-all"
-          :class="{
-            'bg-background/60': siteSyncStates.get(site.id)?.phase === 'syncing',
-            'bg-signal/10 dark:bg-signal/5': siteSyncStates.get(site.id)?.phase === 'done',
-            'bg-destructive/10 dark:bg-destructive/5': siteSyncStates.get(site.id)?.phase === 'error',
-          }"
-        >
-          <template v-if="siteSyncStates.get(site.id)?.phase === 'syncing'">
-            <Loader2 class="h-6 w-6 animate-spin text-primary" />
-            <span class="mt-2 text-sm font-medium text-foreground">{{ t('admin.upstream.syncStream.syncing') }}</span>
-          </template>
-          <template v-else-if="siteSyncStates.get(site.id)?.phase === 'done'">
-            <CheckCircle2 class="h-6 w-6 text-signal" />
-            <span class="mt-2 text-sm font-medium text-signal">{{ t('admin.upstream.syncStream.done') }}</span>
-          </template>
-          <template v-else-if="siteSyncStates.get(site.id)?.phase === 'error'">
-            <XCircle class="h-6 w-6 text-destructive" />
-            <span class="mt-2 text-sm font-medium text-destructive">{{ t('admin.upstream.syncStream.error') }}</span>
-          </template>
-        </div>
-
-        <!-- Card Header -->
-        <div class="flex flex-col gap-4 mb-5 border-b border-border/40 pb-4">
-          <div class="flex items-start justify-between gap-2">
-            <div class="flex items-center gap-3 min-w-0">
-              <div :class="['w-10 h-10 rounded-xl flex items-center justify-center font-bold text-lg shrink-0', site.logoBg]">
-                {{ site.logo }}
-              </div>
-              <div class="flex flex-col min-w-0">
-                <a :href="site.baseUrl" target="_blank" rel="noopener noreferrer" class="font-semibold text-lg text-foreground hover:text-primary transition-colors cursor-pointer truncate" :title="site.name">
-                  {{ site.name }}
-                </a>
-                <span class="px-2 py-0.5 mt-1 rounded-md bg-primary/10 text-primary border border-primary/20 text-[10px] font-bold uppercase tracking-wider w-fit">
-                  {{ t(`admin.upstream.modal.form.platforms.${site.platform}`) }}
-                </span>
-              </div>
-            </div>
-
-            <div
-              class="flex items-center gap-1.5 px-2 py-1 rounded-md text-[11px] font-medium border shrink-0"
-              :class="statusClasses[site.status]"
-            >
-              <Loader2 v-if="site.status === 'connecting' || site.status === 'syncing'" class="w-3 h-3 animate-spin" />
-              <CheckCircle2 v-else-if="site.status === 'connected'" class="w-3 h-3" />
-              <XCircle v-else class="w-3 h-3" />
-              {{ statusLabel(site.status) }}
-            </div>
-          </div>
-        </div>
-
-        <!-- Card Body (Stats) -->
-        <div class="space-y-4">
-          <div class="grid grid-cols-3 gap-3">
-            <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
-              <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.balance') }}</span>
-              <span v-if="cnyMetricDisplay(site, site.metrics.balance)" class="font-bold text-primary text-sm text-center">
-                {{ cnyMetricDisplay(site, site.metrics.balance) }}
-              </span>
-              <span :class="[cnyMetricDisplay(site, site.metrics.balance) ? 'text-[10px] font-medium text-primary/70 mt-0.5' : 'font-bold text-primary text-sm', 'text-center']">
-                {{ usdMetricDisplay(site.metrics.balance) }}
-              </span>
-            </div>
-            <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
-              <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.todayConsume') }}</span>
-              <span v-if="cnyMetricDisplay(site, site.metrics.todayConsume)" :class="['font-bold text-sm text-center', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? 'text-orange-500' : 'text-foreground']">
-                {{ cnyMetricDisplay(site, site.metrics.todayConsume) }}
-              </span>
-              <span :class="[cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-[10px] font-medium mt-0.5' : 'font-bold text-sm', site.metrics.todayConsume.value && site.metrics.todayConsume.value > 0 ? (cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-orange-500/70' : 'text-orange-500') : (cnyMetricDisplay(site, site.metrics.todayConsume) ? 'text-muted-foreground' : 'text-foreground'), 'text-center']">
-                {{ usdMetricDisplay(site.metrics.todayConsume) }}
-              </span>
-            </div>
-            <div class="flex flex-col items-center justify-center p-3 rounded-xl bg-surface/50 border border-border/40">
-              <span class="text-xs text-muted-foreground mb-1">{{ t('admin.upstream.fields.historyRecharge') }}</span>
-              <span v-if="cnyMetricDisplay(site, site.metrics.historyRecharge)" class="font-bold text-foreground text-sm text-center">
-                {{ cnyMetricDisplay(site, site.metrics.historyRecharge) }}
-              </span>
-              <span :class="[cnyMetricDisplay(site, site.metrics.historyRecharge) ? 'text-[10px] font-medium text-muted-foreground mt-0.5' : 'font-bold text-foreground text-sm', 'text-center']">
-                {{ usdMetricDisplay(site.metrics.historyRecharge) }}
-              </span>
-            </div>
-          </div>
-
-          <Button
-            v-if="site.metrics.groups.length > 0"
-            variant="secondary"
-            class="w-full h-9 text-xs font-medium bg-surface hover:bg-surface-elevated border-border/50 border"
-            @click="openGroupsModal(site)"
-          >
-            {{ t('admin.upstream.fields.viewAvailableGroups') }}
-          </Button>
-
-          <!-- Card Actions (Edit/Delete) -->
-          <div class="flex items-center justify-between gap-3 pt-4 mt-2 border-t border-border/40">
-            <div class="min-w-0 text-left text-[11px] leading-5 text-muted-foreground">
-              <span class="block truncate">{{ t('admin.upstream.fields.lastUpdated') }}</span>
-              <span class="block truncate font-medium text-foreground/80">{{ lastUpdatedDisplay(site) }}</span>
-            </div>
-            <div class="flex shrink-0 items-center justify-end gap-2">
-              <Tooltip :text="syncingSiteIds.has(site.id) ? t('admin.upstream.action.syncing') : t('admin.upstream.action.sync')">
-                <button
-                  type="button"
-                  class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border/60 text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-primary"
-                  :disabled="syncingSiteIds.has(site.id)"
-                  @click="refreshSingleSite(site.id)"
-                >
-                  <Loader2 v-if="syncingSiteIds.has(site.id)" class="h-4 w-4 animate-spin" />
-                  <RefreshCw v-else class="h-4 w-4" />
-                </button>
-              </Tooltip>
-              <Tooltip :text="t('admin.upstream.action.settings')">
-                <button
-                  type="button"
-                  class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border/60 text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-primary"
-                  @click="openSiteSettings(site)"
-                >
-                  <Settings2 class="h-4 w-4" />
-                </button>
-              </Tooltip>
-              <Tooltip :text="t('admin.upstream.action.edit')">
-                <button
-                  type="button"
-                  class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border/60 text-muted-foreground transition-colors hover:border-primary/60 hover:bg-primary/10 hover:text-primary"
-                  @click="handleEditSite(site)"
-                >
-                  <Edit2 class="h-4 w-4" />
-                </button>
-              </Tooltip>
-              <Tooltip :text="t('admin.upstream.delete.action')">
-                <button
-                  type="button"
-                  class="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-border/60 text-muted-foreground transition-colors hover:border-red-400/60 hover:bg-red-500/10 hover:text-red-400"
-                  @click="requestDeleteSite(site.id)"
-                >
-                  <Trash2 class="h-4 w-4" />
-                </button>
-              </Tooltip>
-            </div>
-          </div>
-        </div>
-
-        <div v-if="site.errorKey" class="mt-4 flex items-start gap-2 rounded-xl border border-warning/20 bg-warning/10 px-3 py-2 text-xs text-warning">
-          <AlertCircle class="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          <span>{{ t(site.errorKey) }}</span>
-        </div>
-      </div>
-    </div>
-
     <!-- Table (List) View -->
-    <div v-if="viewMode === 'list'" class="rounded-2xl border border-border/60 bg-card overflow-hidden shadow-sm">
+    <div class="rounded-2xl border border-border/60 bg-card overflow-hidden shadow-sm">
       <div class="overflow-x-auto">
         <table class="w-full text-sm text-left">
           <thead class="bg-surface/50 text-muted-foreground border-b border-border/40">

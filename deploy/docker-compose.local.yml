@@ -1,0 +1,50 @@
+services:
+  app:
+    image: deviseo/transithub:local
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.local
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:10621:10621"
+    environment:
+      PORT: "10621"
+      DATABASE_URL: postgres://transithub:lyfzsx2005@postgres:5432/transithub?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      ADMIN_EMAIL: 3496712906@qq.com
+      ADMIN_PASSWORD: lyfzsx2005
+      ALLOW_PUBLIC_REGISTER: "false"
+      TICKET_UPLOAD_DIR: /app/data/ticket-uploads
+    volumes:
+      - ../data/ticket-uploads:/app/data/ticket-uploads
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: transithub
+      POSTGRES_USER: transithub
+      POSTGRES_PASSWORD: lyfzsx2005
+    volumes:
+      - ../data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transithub -d transithub"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:8-alpine
+    restart: unless-stopped
+    volumes:
+      - ../data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5

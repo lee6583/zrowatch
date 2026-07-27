@@ -1,0 +1,34 @@
+# Local-only Dockerfile for running TransitHub on this Mac when Docker Hub pulls
+# for the exact production base images are slow or unavailable.
+#
+# The app code is unchanged; only cached base images are used.
+
+FROM node:22-alpine AS frontend-builder
+WORKDIR /src/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci
+COPY frontend/ .
+ARG VITE_API_BASE_URL=/api
+ENV VITE_API_BASE_URL=${VITE_API_BASE_URL}
+RUN npm run build
+
+FROM golang:1.26.1-alpine AS backend-builder
+WORKDIR /src/backend
+ENV GOPROXY=https://goproxy.cn,direct
+COPY backend/go.mod backend/go.sum ./
+RUN go mod download
+COPY backend/ .
+RUN CGO_ENABLED=0 go build -o /out/transithub-api ./cmd/api
+
+FROM golang:1.26.1-alpine
+RUN mkdir -p /app/data
+
+COPY --from=backend-builder /out/transithub-api /app/transithub-api
+COPY --from=frontend-builder /src/frontend/dist /app/public
+
+ENV PORT=10621
+ENV PUBLIC_DIR=/app/public
+ENV TICKET_UPLOAD_DIR=/app/data/ticket-uploads
+EXPOSE 10621
+
+ENTRYPOINT ["/app/transithub-api"]
