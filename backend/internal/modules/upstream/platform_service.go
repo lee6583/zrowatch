@@ -2257,7 +2257,8 @@ func (s *PlatformService) UpdateAdminTargetPriority(session Session, targetID st
 	case PlatformNewAPI:
 		return s.updateNewAPIChannelPriority(session, targetID, priority)
 	case PlatformSub2API:
-		return s.updateSub2APIAdminAccountPriority(session, targetID, priority)
+		_, err := s.UpdateSub2APIAdminAccountPriority(session, targetID, priority)
+		return err
 	default:
 		return newRequestError(ErrorAuth, session.Platform)
 	}
@@ -2298,37 +2299,22 @@ func (s *PlatformService) updateNewAPIChannelPriority(session Session, channelID
 	return err
 }
 
-func (s *PlatformService) updateSub2APIAdminAccountPriority(session Session, accountID string, priority int) error {
+// UpdateSub2APIAdminAccountPriority uses Sub2API's partial account update
+// semantics, so changing priority requires only one remote request and cannot
+// overwrite unrelated account fields.
+func (s *PlatformService) UpdateSub2APIAdminAccountPriority(session Session, accountID string, priority int) (Sub2APIAdminAccountState, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() || strings.TrimSpace(accountID) == "" {
-		return newRequestError(ErrorAuth, PlatformSub2API)
+		return Sub2APIAdminAccountState{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
-	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
-	if err != nil {
-		return err
-	}
-	data := dataRecord(response.Payload)
-	if len(data) == 0 {
-		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
-	}
-	payload := map[string]any{"priority": priority}
-	for _, key := range []string{
-		"name", "notes", "type", "credentials", "extra", "proxy_id", "status", "schedulable",
-		"concurrency", "rate_multiplier", "load_factor", "expires_at", "auto_pause_on_expired",
-		"confirm_mixed_channel_risk",
-	} {
-		if value, ok := data[key]; ok {
-			payload[key] = value
-		}
-	}
-	if groupIDs := resolveSub2APIAccountGroupIDsForPayload(data); len(groupIDs) > 0 {
-		payload["group_ids"] = groupIDs
-	}
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPut
-	options.Body = payload
-	_, err = s.httpClient.requestJSON(accountURL, options)
-	return err
+	options.Body = map[string]any{"priority": priority}
+	response, err := s.httpClient.requestJSON(accountURL, options)
+	if err != nil {
+		return Sub2APIAdminAccountState{}, err
+	}
+	return sub2APIAdminAccountStateFromPayload(accountID, response.Payload)
 }
 
 // UpdateSub2APIAdminAccountStatus 通过 GET+PUT /api/v1/admin/accounts/:id 更新 sub2api 转发账号的
@@ -2348,9 +2334,11 @@ func (s *PlatformService) UpdateSub2APIAdminAccountStatus(session Session, accou
 // required by balance protection and the scheduling UI. The complete response
 // remains internal to PlatformService so credentials never cross module APIs.
 type Sub2APIAdminAccountState struct {
+	ID          string
 	Name        string
 	Status      string
 	Schedulable *bool
+	Priority    *int
 }
 
 // GetSub2APIAdminAccountState reads one forwarding account without exposing its
@@ -2367,14 +2355,25 @@ func (s *PlatformService) GetSub2APIAdminAccountState(session Session, accountID
 	if err != nil {
 		return Sub2APIAdminAccountState{}, err
 	}
-	data := dataRecord(response.Payload)
+	return sub2APIAdminAccountStateFromPayload(accountID, response.Payload)
+}
+
+func sub2APIAdminAccountStateFromPayload(accountID string, payload any) (Sub2APIAdminAccountState, error) {
+	data := dataRecord(payload)
 	if len(data) == 0 {
 		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
+	priority := firstInt(data, []string{"priority"})
+	if priority == nil {
+		defaultPriority := 1
+		priority = &defaultPriority
+	}
 	return Sub2APIAdminAccountState{
+		ID:          accountID,
 		Name:        safeString(data, "name"),
 		Status:      stringOrNumberField(data, []string{"status"}),
 		Schedulable: firstBoolValue(data, []string{"schedulable"}),
+		Priority:    priority,
 	}, nil
 }
 
@@ -2446,9 +2445,6 @@ func (s *PlatformService) UpdateSub2APIAdminAccountGroupIDs(session Session, acc
 	}
 	// Keep the numeric/string element types supplied by the remote API.
 	groupIDsValue := resolveSub2APIAccountGroupIDsForPayload(data)
-	if len(groupIDsValue) == 0 {
-		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
-	}
 	existingByID := make(map[string]any, len(groupIDsValue))
 	for _, value := range groupIDsValue {
 		existingByID[fmt.Sprint(value)] = value
@@ -2558,12 +2554,17 @@ func (s *PlatformService) updateSub2APIAdminAccountState(session Session, accoun
 		Name:        safeString(data, "name"),
 		Status:      stringOrNumberField(data, []string{"status"}),
 		Schedulable: currentSchedulable,
+		Priority:    firstInt(data, []string{"priority"}),
 	}
 	if status != nil {
 		result.Status = *status
 	}
 	if schedulable != nil {
 		result.Schedulable = schedulable
+	}
+	if result.Priority == nil {
+		defaultPriority := 1
+		result.Priority = &defaultPriority
 	}
 	// Some Sub2API versions return the updated account from PUT. Prefer those
 	// values when present, while remaining compatible with empty PUT responses.
@@ -2573,6 +2574,9 @@ func (s *PlatformService) updateSub2APIAdminAccountState(session Session, accoun
 		}
 		if value := firstBoolValue(updatedData, []string{"schedulable"}); value != nil {
 			result.Schedulable = value
+		}
+		if value := firstInt(updatedData, []string{"priority"}); value != nil {
+			result.Priority = value
 		}
 	}
 	return result, nil

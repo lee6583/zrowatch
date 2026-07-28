@@ -24,6 +24,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/bound-dispatch-accounts", handler.boundDispatchAccounts)
 	mux.HandleFunc("GET /api/connection-health/group-rate-monitor/settings", handler.groupRateMonitorSettings)
 	mux.HandleFunc("PUT /api/connection-health/group-rate-monitor/settings", handler.putGroupRateMonitorSettings)
+	mux.HandleFunc("PUT /api/connection-health/group-rate-monitor/cost-guard", handler.putGroupRateMonitorCostGuard)
 	mux.HandleFunc("GET /api/connection-health/group-rate-monitor/summaries", handler.groupRateMonitorSummaries)
 	mux.HandleFunc("POST /api/connection-health/group-rate-monitor/probe", handler.probeGroupRateMonitor)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
@@ -40,6 +41,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/policy-assignments", handler.putPolicyAssignments)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/scheduling", handler.updateScheduling)
 	mux.HandleFunc("PUT /api/connection-health/targets/{id}/dispatch", handler.updateDispatch)
+	mux.HandleFunc("PUT /api/connection-health/targets/{id}/priority", handler.updatePriority)
 	mux.HandleFunc("GET /api/connection-health/admin-groups/{id}/policy-configuration", handler.getAdminGroupPolicyConfiguration)
 	mux.HandleFunc("PUT /api/connection-health/admin-groups/{id}/policy-configuration", handler.putAdminGroupPolicyConfiguration)
 }
@@ -70,6 +72,25 @@ func (h *Handler) putGroupRateMonitorSettings(w http.ResponseWriter, r *http.Req
 		return
 	}
 	result, err := h.service.SaveGroupRateMonitorSettings(r.Context(), userID, input)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) putGroupRateMonitorCostGuard(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input GroupRateMonitorCostGuardInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.service.SetGroupRateMonitorCostGuard(r.Context(), userID, input.Enabled)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -144,6 +165,27 @@ func (h *Handler) updateDispatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	state, err := h.service.UpdateTargetDispatch(r.Context(), userID, r.PathValue("id"), *input.Enabled)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, state)
+}
+
+func (h *Handler) updatePriority(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input struct {
+		Priority *int `json:"priority"`
+	}
+	if err := httpjson.Decode(r, &input); err != nil || input.Priority == nil || *input.Priority < 1 || *input.Priority > 50000 {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	state, err := h.service.UpdateTargetPriority(r.Context(), userID, r.PathValue("id"), *input.Priority)
 	if err != nil {
 		writeError(w, err)
 		return

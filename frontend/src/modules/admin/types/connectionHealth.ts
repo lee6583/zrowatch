@@ -157,6 +157,7 @@ export interface AdminGroupHealth {
 export interface TargetDispatchState {
   status: string
   schedulable: boolean
+  priority?: number
 }
 
 export interface BoundDispatchAccountState {
@@ -164,6 +165,7 @@ export interface BoundDispatchAccountState {
   name: string
   status: string
   schedulable?: boolean
+  priority?: number
   targetId: string
   available: boolean
   unavailableReason?: 'not_found' | 'invalid_state' | 'unavailable' | string
@@ -225,6 +227,7 @@ export interface GroupRateMonitorRestoreSummary {
 
 export interface GroupRateMonitorSettings {
   enabled: boolean
+  costGuardEnabled: boolean
   probeIntervalSeconds: number
   failureThreshold: number
   defaultModel: string
@@ -258,6 +261,7 @@ export interface GroupRateMonitorGroupConfig {
 
 export interface GroupRateMonitorSettingsInput {
   enabled: boolean
+  costGuardEnabled: boolean
   probeIntervalSeconds: number
   failureThreshold: number
   defaultModel: string

@@ -31,10 +31,10 @@ type groupRateMonitorRepository interface {
 func (r *Repository) GetGroupRateMonitorSettings(ctx context.Context, userID, adminAccountID string) (GroupRateMonitorSettings, error) {
 	settings := defaultGroupRateMonitorSettings(userID, adminAccountID)
 	err := r.db.QueryRow(ctx, `
-		SELECT enabled, probe_interval_seconds, failure_threshold, default_model, updated_at
+		SELECT enabled, cost_guard_enabled, probe_interval_seconds, failure_threshold, default_model, updated_at
 		FROM connection_health_group_rate_monitor_settings
 		WHERE user_id = $1 AND admin_account_id = $2
-	`, userID, adminAccountID).Scan(&settings.Enabled, &settings.ProbeIntervalSeconds, &settings.FailureThreshold, &settings.DefaultModel, &settings.UpdatedAt)
+	`, userID, adminAccountID).Scan(&settings.Enabled, &settings.CostGuardEnabled, &settings.ProbeIntervalSeconds, &settings.FailureThreshold, &settings.DefaultModel, &settings.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return settings, nil
 	}
@@ -49,15 +49,16 @@ func (r *Repository) SaveGroupRateMonitorSettings(ctx context.Context, settings 
 	defer func() { _ = tx.Rollback(ctx) }()
 	if _, err = tx.Exec(ctx, `
 		INSERT INTO connection_health_group_rate_monitor_settings (
-			user_id, admin_account_id, enabled, probe_interval_seconds, failure_threshold, default_model, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,now())
+			user_id, admin_account_id, enabled, cost_guard_enabled, probe_interval_seconds, failure_threshold, default_model, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,now())
 		ON CONFLICT (user_id, admin_account_id) DO UPDATE SET
 			enabled = EXCLUDED.enabled,
+			cost_guard_enabled = EXCLUDED.cost_guard_enabled,
 			probe_interval_seconds = EXCLUDED.probe_interval_seconds,
 			failure_threshold = EXCLUDED.failure_threshold,
 			default_model = EXCLUDED.default_model,
 			updated_at = now()
-	`, settings.UserID, settings.AdminAccountID, settings.Enabled, settings.ProbeIntervalSeconds, settings.FailureThreshold, settings.DefaultModel); err != nil {
+	`, settings.UserID, settings.AdminAccountID, settings.Enabled, settings.CostGuardEnabled, settings.ProbeIntervalSeconds, settings.FailureThreshold, settings.DefaultModel); err != nil {
 		return err
 	}
 	if _, err = tx.Exec(ctx, `
@@ -123,7 +124,7 @@ func (r *Repository) ListGroupRateMonitorTypeDefaults(ctx context.Context, userI
 
 func (r *Repository) ListEnabledGroupRateMonitorSettings(ctx context.Context) ([]GroupRateMonitorSettings, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT user_id, admin_account_id, enabled, probe_interval_seconds, failure_threshold, default_model, updated_at
+		SELECT user_id, admin_account_id, enabled, cost_guard_enabled, probe_interval_seconds, failure_threshold, default_model, updated_at
 		FROM connection_health_group_rate_monitor_settings
 		WHERE enabled
 	`)
@@ -134,7 +135,7 @@ func (r *Repository) ListEnabledGroupRateMonitorSettings(ctx context.Context) ([
 	result := make([]GroupRateMonitorSettings, 0)
 	for rows.Next() {
 		var settings GroupRateMonitorSettings
-		if err := rows.Scan(&settings.UserID, &settings.AdminAccountID, &settings.Enabled, &settings.ProbeIntervalSeconds,
+		if err := rows.Scan(&settings.UserID, &settings.AdminAccountID, &settings.Enabled, &settings.CostGuardEnabled, &settings.ProbeIntervalSeconds,
 			&settings.FailureThreshold, &settings.DefaultModel, &settings.UpdatedAt); err != nil {
 			return nil, err
 		}

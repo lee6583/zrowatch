@@ -87,19 +87,17 @@ func TestUpdateSub2APIAdminAccountStatus_PutBodyPreservesFieldsAndOnlyChangesSta
 	}
 }
 
-func TestUpdateAdminTargetPriority_Sub2APIPreservesSchedulingFields(t *testing.T) {
+func TestUpdateAdminTargetPriority_Sub2APIUsesPartialUpdate(t *testing.T) {
 	var putBody map[string]any
+	requestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
 		switch {
-		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts/acc-1":
-			writeJSON(w, map[string]any{"data": map[string]any{
-				"id": "acc-1", "name": "account", "type": "openai", "status": "active",
-				"credentials": map[string]any{"api_key": "sk-secret"}, "group_ids": []any{50},
-				"priority": 10, "concurrency": 5, "rate_multiplier": 1.4, "load_factor": 2,
-			}})
 		case r.Method == http.MethodPut && r.URL.Path == "/api/v1/admin/accounts/acc-1":
 			putBody, _ = readJSONBody(r)
-			writeJSON(w, map[string]any{"success": true})
+			writeJSON(w, map[string]any{"data": map[string]any{
+				"id": "acc-1", "name": "account", "status": "active", "schedulable": true, "priority": 40999,
+			}})
 		default:
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
@@ -111,12 +109,34 @@ func TestUpdateAdminTargetPriority_Sub2APIPreservesSchedulingFields(t *testing.T
 	if err := service.UpdateAdminTargetPriority(session, "acc-1", 40999); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if putBody["priority"] != float64(40999) || putBody["status"] != "active" || putBody["concurrency"] != float64(5) {
-		t.Fatalf("priority update must preserve status/concurrency: %+v", putBody)
+	if requestCount != 1 {
+		t.Fatalf("priority update must use one remote request, got %d", requestCount)
 	}
-	groupIDs, ok := putBody["group_ids"].([]any)
-	if !ok || len(groupIDs) != 1 || groupIDs[0] != float64(50) {
-		t.Fatalf("numeric group id must remain numeric: %+v", putBody["group_ids"])
+	if len(putBody) != 1 || putBody["priority"] != float64(40999) {
+		t.Fatalf("priority update must send only priority: %+v", putBody)
+	}
+}
+
+func TestGetSub2APIAdminAccountState_DefaultsPriorityToOne(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/v1/admin/accounts/acc-1" {
+			writeJSON(w, map[string]any{"data": map[string]any{
+				"id": "acc-1", "name": "account", "status": "active", "schedulable": true,
+			}})
+			return
+		}
+		t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token", TokenType: "Bearer"}
+	state, err := service.GetSub2APIAdminAccountState(session, "acc-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if state.Priority == nil || *state.Priority != 1 {
+		t.Fatalf("expected default priority=1, got %+v", state.Priority)
 	}
 }
 
@@ -158,6 +178,43 @@ func TestUpdateSub2APIAdminAccountStatus_NumericGroupIDsStayNumeric(t *testing.T
 	}
 	if groupIDs[0].(float64) != 50 {
 		t.Fatalf("expected group id 50, got %v", groupIDs[0])
+	}
+}
+
+func TestUpdateSub2APIAdminAccountGroupIDs_CanAddToEmptyAccount(t *testing.T) {
+	var putBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			writeJSON(w, map[string]any{
+				"data": map[string]any{
+					"id": "1515", "name": "account", "status": "active",
+					"credentials": map[string]any{"api_key": "sk-secret"},
+					"group_ids":   []any{}, "priority": float64(3), "concurrency": float64(5),
+				},
+			})
+		case http.MethodPut:
+			body, err := readJSONBody(r)
+			if err != nil {
+				t.Fatalf("failed to decode PUT body: %v", err)
+			}
+			putBody = body
+			writeJSON(w, map[string]any{"success": true})
+		}
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token-1", TokenType: "Bearer"}
+	if err := service.UpdateSub2APIAdminAccountGroupIDs(session, "1515", []string{"18"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	groupIDs, ok := putBody["group_ids"].([]any)
+	if !ok || len(groupIDs) != 1 || groupIDs[0] != float64(18) {
+		t.Fatalf("expected numeric group_ids [18], got %#v", putBody["group_ids"])
+	}
+	if putBody["credentials"] == nil || putBody["priority"] != float64(3) || putBody["concurrency"] != float64(5) {
+		t.Fatalf("expected existing account fields preserved, got %#v", putBody)
 	}
 }
 

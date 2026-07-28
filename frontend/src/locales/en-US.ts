@@ -1290,7 +1290,7 @@ export default {
       },
       errors: {
         request: 'Operation failed. Please try again.',
-        balanceSuspended: 'The account\'s upstream site has insufficient balance, so scheduling cannot be enabled yet.',
+        balanceSuspended: 'Exhausted',
         unknown: 'Group health data is temporarily unavailable. Please try again.',
         network: 'Network error. Check your connection and try again.',
         notFound: 'Probe target not found or inaccessible.',
@@ -1513,6 +1513,7 @@ export default {
         latestProbe: 'Last Probe',
         updatedAt: 'Updated Time',
         dispatch: 'Dispatch',
+        priority: 'Priority',
         actions: 'Actions'
       },
       dispatch: {
@@ -1525,6 +1526,13 @@ export default {
         loadFailed: 'Failed to load dispatch state. Refresh and try again.',
         updateFailed: 'Failed to update dispatch. Please try again.'
       },
+      priority: {
+        edit: 'Edit priority',
+        loading: 'Loading priority…',
+        updating: 'Updating priority…',
+        unavailable: 'No priority available',
+        updateFailed: 'Failed to update priority. Please try again.'
+      },
       health: {
         noResult: 'No probe result',
         status: {
@@ -1533,7 +1541,8 @@ export default {
           unhealthy: 'Failed',
           unavailable: 'Unavailable',
           unconfigured: 'Not set',
-          stale: 'Stale'
+          stale: 'Stale',
+          exhausted: 'Exhausted'
         },
         trigger: {
           manual: 'Manual probe',
@@ -1564,7 +1573,8 @@ export default {
           base_url_unavailable: 'Base URL unavailable',
           model_unavailable: 'Model unavailable',
           export_unavailable: 'Account export unavailable',
-          credentials_redacted: 'Account credentials are redacted'
+          credentials_redacted: 'Account credentials are redacted',
+          balance_suspended: 'Exhausted'
         },
         probe: {
           action: 'Probe now',
@@ -1581,6 +1591,7 @@ export default {
           action: 'Probe Settings',
           title: 'Probe Settings',
           description: 'Probe each upstream group with its site URL and API key, then stop its bound downstream Sub2API accounts after consecutive failures.',
+          costGuard: 'Cost Guard',
           loading: 'Loading probe settings...',
           enabled: 'Enable automatic probing',
           enabledHint: 'Current and future connected upstream groups are probed automatically with their own site URL and API key.',

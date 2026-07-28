@@ -243,27 +243,43 @@ type RealConnectResponse struct {
 //   - AdminAccountID: 上游平台的 admin 转发账号 ID，是真实对接业务逻辑中的字段，
 //     表示在上游 sub2api/new-api 站点上为 key 创建或绑定的管理员账号。
 type RealConnection struct {
-	ID                      string   `json:"id"`
-	UserID                  string   `json:"-"`
-	WorkspaceAdminAccountID string   `json:"-"` // TransitHub workspace 归属（隔离字段）
-	UpstreamSiteID          string   `json:"upstreamSiteId"`
-	UpstreamGroupID         string   `json:"upstreamGroupId"`
-	UpstreamGroupName       string   `json:"upstreamGroupName"`
-	UpstreamKeyID           string   `json:"upstreamKeyId"`
-	UpstreamKey             string   `json:"upstreamKey"`
-	AdminAccountID          string   `json:"adminAccountId"` // 上游平台 admin 转发账号 ID（业务字段）
-	AdminAccountName        string   `json:"adminAccountName"`
-	OwnGroupIDs             []string `json:"ownGroupIds"`
-	OwnGroupNames           []string `json:"ownGroupNames"`
-	GroupType               string   `json:"groupType"`
-	ProvisioningMode        string   `json:"provisioningMode"`
-	Status                  string   `json:"status"`
-	UpstreamPlatform        string   `json:"upstreamPlatform"`
-	AdminPlatform           string   `json:"adminPlatform"`
-	PricingMappingEnabled   bool     `json:"pricingMappingEnabled"`
-	OperationID             string   `json:"-"`
-	CanDeleteRemote         bool     `json:"canDeleteRemote"`
-	CreatedAt               string   `json:"createdAt"`
+	ID                           string   `json:"id"`
+	UserID                       string   `json:"-"`
+	WorkspaceAdminAccountID      string   `json:"-"` // TransitHub workspace 归属（隔离字段）
+	UpstreamSiteID               string   `json:"upstreamSiteId"`
+	UpstreamGroupID              string   `json:"upstreamGroupId"`
+	UpstreamGroupName            string   `json:"upstreamGroupName"`
+	UpstreamKeyID                string   `json:"upstreamKeyId"`
+	UpstreamKey                  string   `json:"upstreamKey"`
+	AdminAccountID               string   `json:"adminAccountId"` // 上游平台 admin 转发账号 ID（业务字段）
+	AdminAccountName             string   `json:"adminAccountName"`
+	OwnGroupIDs                  []string `json:"ownGroupIds"`
+	OwnGroupNames                []string `json:"ownGroupNames"`
+	CostGuardPausedOwnGroupIDs   []string `json:"costGuardPausedOwnGroupIds"`
+	CostGuardPausedOwnGroupNames []string `json:"costGuardPausedOwnGroupNames"`
+	GroupType                    string   `json:"groupType"`
+	ProvisioningMode             string   `json:"provisioningMode"`
+	Status                       string   `json:"status"`
+	UpstreamPlatform             string   `json:"upstreamPlatform"`
+	AdminPlatform                string   `json:"adminPlatform"`
+	PricingMappingEnabled        bool     `json:"pricingMappingEnabled"`
+	OperationID                  string   `json:"-"`
+	CanDeleteRemote              bool     `json:"canDeleteRemote"`
+	CreatedAt                    string   `json:"createdAt"`
+}
+
+// CostGuardPause 记录某条真实对接在亏本保护下被临时移除的下游分组。
+type CostGuardPause struct {
+	UserID                  string    `json:"-"`
+	WorkspaceAdminAccountID string    `json:"-"`
+	ConnectionID            string    `json:"connectionId"`
+	UpstreamSiteID          string    `json:"upstreamSiteId"`
+	UpstreamGroupID         string    `json:"upstreamGroupId"`
+	UpstreamGroupName       string    `json:"upstreamGroupName"`
+	OwnGroupID              string    `json:"ownGroupId"`
+	OwnGroupName            string    `json:"ownGroupName"`
+	LastError               string    `json:"lastError"`
+	UpdatedAt               time.Time `json:"updatedAt"`
 }
 
 type DownstreamConsumptionStatus string

@@ -77,6 +77,24 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	_, err = r.db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS real_connection_cost_guard_pauses (
+			user_id text NOT NULL,
+			workspace_admin_account_id text NOT NULL DEFAULT '',
+			connection_id text NOT NULL,
+			upstream_site_id text NOT NULL,
+			upstream_group_id text NOT NULL DEFAULT '',
+			upstream_group_name text NOT NULL DEFAULT '',
+			own_group_id text NOT NULL,
+			own_group_name text NOT NULL DEFAULT '',
+			last_error text NOT NULL DEFAULT '',
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, workspace_admin_account_id, connection_id, own_group_id)
+		)
+	`)
+	if err != nil {
+		return err
+	}
 	statements = []string{
 		`ALTER TABLE real_connections ADD COLUMN IF NOT EXISTS workspace_admin_account_id text NOT NULL DEFAULT ''`,
 		`ALTER TABLE real_connections ADD COLUMN IF NOT EXISTS own_group_names jsonb NOT NULL DEFAULT '[]'::jsonb`,
@@ -390,6 +408,12 @@ func scanRealConnection(row realConnectionScanner) (*RealConnection, error) {
 	if err := json.Unmarshal(ownGroupNamesJSON, &conn.OwnGroupNames); err != nil {
 		return nil, err
 	}
+	if conn.OwnGroupIDs == nil {
+		conn.OwnGroupIDs = []string{}
+	}
+	if conn.OwnGroupNames == nil {
+		conn.OwnGroupNames = []string{}
+	}
 	conn.CanDeleteRemote = conn.ProvisioningMode == ProvisioningModeManaged
 	conn.CreatedAt = createdAt.Format(time.RFC3339)
 	return &conn, nil
@@ -639,6 +663,68 @@ func (r *Repository) UpdateRealConnectionGroups(ctx context.Context, conn RealCo
 	}
 	committed = true
 	return nil
+}
+
+// ListCostGuardPauses 返回当前 workspace 下由亏本保护临时移除的下游分组记录。
+func (r *Repository) ListCostGuardPauses(ctx context.Context, userID, adminAccountID string) ([]CostGuardPause, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT user_id, workspace_admin_account_id, connection_id, upstream_site_id, upstream_group_id,
+			upstream_group_name, own_group_id, own_group_name, last_error, updated_at
+		FROM real_connection_cost_guard_pauses
+		WHERE user_id = $1 AND workspace_admin_account_id = $2
+		ORDER BY updated_at DESC, connection_id, own_group_id
+	`, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]CostGuardPause, 0)
+	for rows.Next() {
+		var pause CostGuardPause
+		if err := rows.Scan(&pause.UserID, &pause.WorkspaceAdminAccountID, &pause.ConnectionID, &pause.UpstreamSiteID,
+			&pause.UpstreamGroupID, &pause.UpstreamGroupName, &pause.OwnGroupID, &pause.OwnGroupName, &pause.LastError, &pause.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, pause)
+	}
+	return result, rows.Err()
+}
+
+// UpsertCostGuardPause 写入或刷新一条亏本保护暂停记录。
+func (r *Repository) UpsertCostGuardPause(ctx context.Context, pause CostGuardPause) error {
+	_, err := r.db.Exec(ctx, `
+		INSERT INTO real_connection_cost_guard_pauses (
+			user_id, workspace_admin_account_id, connection_id, upstream_site_id,
+			upstream_group_id, upstream_group_name, own_group_id, own_group_name, last_error, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now())
+		ON CONFLICT (user_id, workspace_admin_account_id, connection_id, own_group_id) DO UPDATE SET
+			upstream_site_id = EXCLUDED.upstream_site_id,
+			upstream_group_id = EXCLUDED.upstream_group_id,
+			upstream_group_name = EXCLUDED.upstream_group_name,
+			own_group_name = EXCLUDED.own_group_name,
+			last_error = EXCLUDED.last_error,
+			updated_at = now()
+	`, pause.UserID, pause.WorkspaceAdminAccountID, pause.ConnectionID, pause.UpstreamSiteID,
+		pause.UpstreamGroupID, pause.UpstreamGroupName, pause.OwnGroupID, pause.OwnGroupName, pause.LastError)
+	return err
+}
+
+// DeleteCostGuardPause 删除某条连接下单个下游分组的暂停记录。
+func (r *Repository) DeleteCostGuardPause(ctx context.Context, userID, adminAccountID, connectionID, ownGroupID string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM real_connection_cost_guard_pauses
+		WHERE user_id = $1 AND workspace_admin_account_id = $2 AND connection_id = $3 AND own_group_id = $4
+	`, userID, adminAccountID, connectionID, ownGroupID)
+	return err
+}
+
+// DeleteCostGuardPausesForConnection 删除某条连接下全部暂停记录。
+func (r *Repository) DeleteCostGuardPausesForConnection(ctx context.Context, userID, adminAccountID, connectionID string) error {
+	_, err := r.db.Exec(ctx, `
+		DELETE FROM real_connection_cost_guard_pauses
+		WHERE user_id = $1 AND workspace_admin_account_id = $2 AND connection_id = $3
+	`, userID, adminAccountID, connectionID)
+	return err
 }
 
 // RemoveUpstreamMappingAndDeleteConnection atomically removes the mapping target and local connection row.

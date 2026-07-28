@@ -9,9 +9,16 @@ import (
 )
 
 // TargetPriorityActioner 是倍率排序策略对 upstream 模块的唯一写依赖。真实实现根据 session
-// 平台更新 New API channel 或 Sub2API account 的 priority，并使用 GET+PUT merge 保留其它字段。
+// 平台更新 New API channel 或 Sub2API account 的 priority。
 type TargetPriorityActioner interface {
 	UpdateAdminTargetPriority(session upstream.Session, targetID string, priority int) error
+}
+
+// Sub2APITargetPriorityActioner exposes the direct partial-update path used by
+// the interactive priority editor. The returned account state comes from the
+// same PUT response, avoiding a follow-up detail request.
+type Sub2APITargetPriorityActioner interface {
+	UpdateSub2APIAdminAccountPriority(session upstream.Session, targetID string, priority int) (upstream.Sub2APIAdminAccountState, error)
 }
 
 type priorityTargetInventory struct {

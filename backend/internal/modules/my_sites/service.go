@@ -66,6 +66,13 @@ type RealConnectionGroupUpdater interface {
 	UpdateRealConnectionGroups(ctx context.Context, conn RealConnection, groupIDs, groupNames, addedGroupNames, removedGroupNames []string) error
 }
 
+type CostGuardPauseRepository interface {
+	ListCostGuardPauses(ctx context.Context, userID, adminAccountID string) ([]CostGuardPause, error)
+	UpsertCostGuardPause(ctx context.Context, pause CostGuardPause) error
+	DeleteCostGuardPause(ctx context.Context, userID, adminAccountID, connectionID, ownGroupID string) error
+	DeleteCostGuardPausesForConnection(ctx context.Context, userID, adminAccountID, connectionID string) error
+}
+
 // UpstreamSiteLookup 根据 ID 获取上游站点信息（含 Session），供真实对接流程使用。
 type UpstreamSiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
@@ -85,6 +92,22 @@ type AccountRenameResult struct {
 	OldName   string
 	NewName   string
 	Status    string
+}
+
+// GroupRateCostGuardResult 描述一次亏本保护在某个下游分组上的结果。
+type GroupRateCostGuardResult struct {
+	ConnectionID         string
+	AccountID            string
+	AccountName          string
+	UpstreamSiteID       string
+	UpstreamGroupID      string
+	UpstreamGroupName    string
+	OwnGroupID           string
+	OwnGroupName         string
+	UpstreamCost         *float64
+	DownstreamMultiplier *float64
+	Status               string
+	Reason               string
 }
 
 // Service 负责分组映射的查询与保存，以及真实对接的编排。
@@ -606,7 +629,21 @@ func (s *Service) ListRealConnections(ctx context.Context, userID string) ([]Rea
 	if err != nil {
 		return nil, err
 	}
+	pausesByConnection := make(map[string][]CostGuardPause)
+	if pauseRepo, ok := s.connRepository.(CostGuardPauseRepository); ok {
+		pauses, pauseErr := pauseRepo.ListCostGuardPauses(ctx, userID, adminAccountID)
+		if pauseErr != nil {
+			return nil, pauseErr
+		}
+		for _, pause := range pauses {
+			pausesByConnection[pause.ConnectionID] = append(pausesByConnection[pause.ConnectionID], pause)
+		}
+	}
 	for i := range connections {
+		for _, pause := range pausesByConnection[connections[i].ID] {
+			connections[i].CostGuardPausedOwnGroupIDs = append(connections[i].CostGuardPausedOwnGroupIDs, pause.OwnGroupID)
+			connections[i].CostGuardPausedOwnGroupNames = append(connections[i].CostGuardPausedOwnGroupNames, firstNonEmpty(pause.OwnGroupName, pause.OwnGroupID))
+		}
 		connections[i] = publicRealConnection(connections[i])
 	}
 	return connections, nil
@@ -1950,6 +1987,547 @@ func (s *Service) syncLegacyAccountNames(ctx context.Context, session upstream.S
 	return results
 }
 
+// ApplyGroupRateCostGuardAfterSync compares the synced upstream cost against
+// the bound Sub2API downstream group multipliers and removes/restores only the
+// groups that this policy previously touched.
+func (s *Service) ApplyGroupRateCostGuardAfterSync(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, enabled bool) []GroupRateCostGuardResult {
+	if !enabled {
+		results := s.RestoreGroupRateCostGuardPausedConnections(ctx, userID, adminAccountID)
+		if len(results) > 0 {
+			log.Printf("[cost-guard] restore workspace=%s site=%s results=%s", adminAccountID, siteID, summarizeCostGuardResults(results))
+		}
+		return results
+	}
+	_ = siteName
+	_ = oldMetrics
+	if s.repository == nil || s.connRepository == nil || s.platformService == nil || s.upstreamLookup == nil {
+		return nil
+	}
+	pauseRepo, ok := s.connRepository.(CostGuardPauseRepository)
+	if !ok {
+		log.Printf("[cost-guard] pause repository unavailable workspace=%s site=%s", adminAccountID, siteID)
+		return nil
+	}
+	state, err := s.authenticatedState(ctx, userID, adminAccountID)
+	if err != nil || state == nil || state.Session.Platform != upstream.PlatformSub2API || !state.Session.IsAuthenticated() {
+		if err != nil {
+			log.Printf("[cost-guard] session load failed workspace=%s site=%s err=%v", adminAccountID, siteID, err)
+		}
+		return nil
+	}
+	site, err := s.upstreamLookup.GetSite(ctx, siteID)
+	if err != nil || site == nil || site.UserID != userID || site.AdminAccountID != adminAccountID || site.RechargeRate <= 0 {
+		if err != nil {
+			log.Printf("[cost-guard] site load failed workspace=%s site=%s err=%v", adminAccountID, siteID, err)
+		}
+		return nil
+	}
+	downstreamGroups, err := s.platformService.FetchSub2APIAdminAllGroups(state.Session)
+	if err != nil {
+		log.Printf("[cost-guard] downstream inventory failed workspace=%s site=%s err=%v", adminAccountID, siteID, err)
+		return nil
+	}
+	downstreamByID := make(map[string]upstream.AdminGroupInfo, len(downstreamGroups))
+	for _, group := range downstreamGroups {
+		if strings.TrimSpace(group.ID) != "" {
+			downstreamByID[group.ID] = group
+		}
+	}
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		log.Printf("[cost-guard] connection load failed workspace=%s site=%s err=%v", adminAccountID, siteID, err)
+		return nil
+	}
+	pauses, err := pauseRepo.ListCostGuardPauses(ctx, userID, adminAccountID)
+	if err != nil {
+		log.Printf("[cost-guard] pause load failed workspace=%s site=%s err=%v", adminAccountID, siteID, err)
+		return nil
+	}
+
+	removeGroup := func(ids, names []string, target string) ([]string, []string, bool) {
+		index := -1
+		for i, id := range ids {
+			if id == target {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			return ids, names, false
+		}
+		nextIDs := append([]string(nil), ids[:index]...)
+		nextIDs = append(nextIDs, ids[index+1:]...)
+		nextNames := append([]string(nil), names...)
+		if index < len(nextNames) {
+			nextNames = append(nextNames[:index], nextNames[index+1:]...)
+		}
+		return nextIDs, nextNames, true
+	}
+	appendGroup := func(ids, names []string, targetID, targetName string) ([]string, []string, bool) {
+		if containsString(ids, targetID) {
+			return ids, names, false
+		}
+		ids = append(append([]string(nil), ids...), targetID)
+		names = append(append([]string(nil), names...), targetName)
+		return ids, names, true
+	}
+	groupMultiplierFor := func(groupID, groupName string) *float64 {
+		for _, group := range newMetrics.Groups {
+			if strings.TrimSpace(groupID) != "" && group.ID == groupID && group.Multiplier != nil {
+				return group.Multiplier
+			}
+		}
+		for _, group := range newMetrics.Groups {
+			if group.Name == groupName && group.Multiplier != nil {
+				return group.Multiplier
+			}
+		}
+		return nil
+	}
+	pauseSetByConnection := make(map[string]map[string]CostGuardPause)
+	for _, pause := range pauses {
+		if pause.UserID != userID || pause.WorkspaceAdminAccountID != adminAccountID || pause.UpstreamSiteID != siteID {
+			continue
+		}
+		bucket := pauseSetByConnection[pause.ConnectionID]
+		if bucket == nil {
+			bucket = make(map[string]CostGuardPause)
+			pauseSetByConnection[pause.ConnectionID] = bucket
+		}
+		bucket[pause.OwnGroupID] = pause
+	}
+
+	results := make([]GroupRateCostGuardResult, 0)
+	for _, conn := range connections {
+		if conn.UserID != userID || conn.WorkspaceAdminAccountID != adminAccountID || conn.UpstreamSiteID != siteID {
+			continue
+		}
+		if conn.Status != "" && conn.Status != ConnectionStatusActive {
+			continue
+		}
+		if strings.TrimSpace(conn.AdminPlatform) != "" && !strings.EqualFold(conn.AdminPlatform, string(upstream.PlatformSub2API)) {
+			continue
+		}
+		pauseSet := pauseSetByConnection[conn.ID]
+
+		groupMultiplier := groupMultiplierFor(conn.UpstreamGroupID, conn.UpstreamGroupName)
+		if groupMultiplier == nil {
+			results = append(results, GroupRateCostGuardResult{
+				ConnectionID:      conn.ID,
+				AccountID:         conn.AdminAccountID,
+				AccountName:       conn.AdminAccountName,
+				UpstreamSiteID:    conn.UpstreamSiteID,
+				UpstreamGroupID:   conn.UpstreamGroupID,
+				UpstreamGroupName: conn.UpstreamGroupName,
+				Status:            "skipped",
+				Reason:            "missing_upstream_multiplier",
+			})
+			continue
+		}
+
+		upstreamCost := *groupMultiplier * site.RechargeRate
+		ownNameByID := make(map[string]string, len(conn.OwnGroupIDs))
+		for index, ownID := range conn.OwnGroupIDs {
+			ownName := ownID
+			if index < len(conn.OwnGroupNames) && strings.TrimSpace(conn.OwnGroupNames[index]) != "" {
+				ownName = conn.OwnGroupNames[index]
+			}
+			ownNameByID[ownID] = ownName
+		}
+		currentIDs := append([]string(nil), conn.OwnGroupIDs...)
+		currentNames := append([]string(nil), conn.OwnGroupNames...)
+		desiredIDs := append([]string(nil), currentIDs...)
+		desiredNames := append([]string(nil), currentNames...)
+		connectionResults := make([]GroupRateCostGuardResult, 0, len(currentIDs)+len(pauseSet))
+		pauseCreates := make([]CostGuardPause, 0)
+		pauseDeletes := make([]string, 0)
+		processed := make(map[string]struct{}, len(currentIDs)+len(pauseSet))
+		emitSkip := func(ownID, ownName, reason string, downstreamMultiplier *float64) {
+			connectionResults = append(connectionResults, GroupRateCostGuardResult{
+				ConnectionID:         conn.ID,
+				AccountID:            conn.AdminAccountID,
+				AccountName:          conn.AdminAccountName,
+				UpstreamSiteID:       conn.UpstreamSiteID,
+				UpstreamGroupID:      conn.UpstreamGroupID,
+				UpstreamGroupName:    conn.UpstreamGroupName,
+				OwnGroupID:           ownID,
+				OwnGroupName:         ownName,
+				UpstreamCost:         pointerFloat64(upstreamCost),
+				DownstreamMultiplier: downstreamMultiplier,
+				Status:               "skipped",
+				Reason:               reason,
+			})
+		}
+		emitRemoved := func(ownID, ownName string, downstreamMultiplier *float64) {
+			connectionResults = append(connectionResults, GroupRateCostGuardResult{
+				ConnectionID:         conn.ID,
+				AccountID:            conn.AdminAccountID,
+				AccountName:          conn.AdminAccountName,
+				UpstreamSiteID:       conn.UpstreamSiteID,
+				UpstreamGroupID:      conn.UpstreamGroupID,
+				UpstreamGroupName:    conn.UpstreamGroupName,
+				OwnGroupID:           ownID,
+				OwnGroupName:         ownName,
+				UpstreamCost:         pointerFloat64(upstreamCost),
+				DownstreamMultiplier: downstreamMultiplier,
+				Status:               "removed",
+			})
+		}
+		emitRestored := func(ownID, ownName string, downstreamMultiplier *float64) {
+			connectionResults = append(connectionResults, GroupRateCostGuardResult{
+				ConnectionID:         conn.ID,
+				AccountID:            conn.AdminAccountID,
+				AccountName:          conn.AdminAccountName,
+				UpstreamSiteID:       conn.UpstreamSiteID,
+				UpstreamGroupID:      conn.UpstreamGroupID,
+				UpstreamGroupName:    conn.UpstreamGroupName,
+				OwnGroupID:           ownID,
+				OwnGroupName:         ownName,
+				UpstreamCost:         pointerFloat64(upstreamCost),
+				DownstreamMultiplier: downstreamMultiplier,
+				Status:               "restored",
+			})
+		}
+		handleOwnGroup := func(ownID string, isPauseOnly bool) {
+			if _, seen := processed[ownID]; seen {
+				return
+			}
+			processed[ownID] = struct{}{}
+			downstreamGroup, exists := downstreamByID[ownID]
+			ownName := firstNonEmpty(ownNameByID[ownID], ownID)
+			if pause, ok := pauseSet[ownID]; ok {
+				ownName = firstNonEmpty(pause.OwnGroupName, ownName)
+			}
+			if !exists || downstreamGroup.Multiplier == nil {
+				emitSkip(ownID, ownName, "missing_downstream_multiplier", nil)
+				return
+			}
+			downstreamMultiplier := downstreamGroup.Multiplier
+			present := containsString(desiredIDs, ownID)
+			paused := false
+			if _, ok := pauseSet[ownID]; ok {
+				paused = true
+			}
+			if upstreamCost > *downstreamMultiplier {
+				if present {
+					desiredIDs, desiredNames, _ = removeGroup(desiredIDs, desiredNames, ownID)
+					if !paused {
+						pauseCreates = append(pauseCreates, CostGuardPause{
+							UserID:                  userID,
+							WorkspaceAdminAccountID: adminAccountID,
+							ConnectionID:            conn.ID,
+							UpstreamSiteID:          siteID,
+							UpstreamGroupID:         conn.UpstreamGroupID,
+							UpstreamGroupName:       conn.UpstreamGroupName,
+							OwnGroupID:              ownID,
+							OwnGroupName:            ownName,
+							LastError:               "cost_guard:upstream_cost_gt_downstream",
+						})
+					}
+					emitRemoved(ownID, ownName, downstreamMultiplier)
+				} else if paused {
+					emitSkip(ownID, ownName, "already_paused", downstreamMultiplier)
+				} else if isPauseOnly {
+					emitSkip(ownID, ownName, "already_absent", downstreamMultiplier)
+				}
+				return
+			}
+			if paused {
+				if !present {
+					desiredIDs, desiredNames, _ = appendGroup(desiredIDs, desiredNames, ownID, ownName)
+				}
+				pauseDeletes = append(pauseDeletes, ownID)
+				emitRestored(ownID, ownName, downstreamMultiplier)
+				return
+			}
+			if isPauseOnly {
+				return
+			}
+		}
+		for _, ownID := range currentIDs {
+			handleOwnGroup(ownID, false)
+		}
+		for ownID := range pauseSet {
+			if !containsString(currentIDs, ownID) {
+				handleOwnGroup(ownID, true)
+			}
+		}
+		if len(connectionResults) == 0 {
+			continue
+		}
+		if len(pauseCreates) > 0 {
+			persistFailed := false
+			for _, pause := range pauseCreates {
+				if err := pauseRepo.UpsertCostGuardPause(ctx, pause); err != nil {
+					log.Printf("[cost-guard] pause upsert failed workspace=%s connection=%s own_group=%s err=%v", adminAccountID, conn.ID, pause.OwnGroupID, err)
+					persistFailed = true
+					break
+				}
+			}
+			if persistFailed {
+				results = append(results, GroupRateCostGuardResult{
+					ConnectionID:      conn.ID,
+					AccountID:         conn.AdminAccountID,
+					AccountName:       conn.AdminAccountName,
+					UpstreamSiteID:    conn.UpstreamSiteID,
+					UpstreamGroupID:   conn.UpstreamGroupID,
+					UpstreamGroupName: conn.UpstreamGroupName,
+					Status:            "failed",
+					Reason:            "pause_persist_failed",
+				})
+				continue
+			}
+		}
+		changedConnection := !sameStringSet(desiredIDs, currentIDs)
+		if changedConnection {
+			if err := s.platformService.UpdateSub2APIAdminAccountGroupIDs(state.Session, conn.AdminAccountID, desiredIDs); err != nil {
+				log.Printf("[cost-guard] remote update failed workspace=%s site=%s connection=%s err=%v", adminAccountID, siteID, conn.ID, err)
+				results = append(results, GroupRateCostGuardResult{
+					ConnectionID:      conn.ID,
+					AccountID:         conn.AdminAccountID,
+					AccountName:       conn.AdminAccountName,
+					UpstreamSiteID:    conn.UpstreamSiteID,
+					UpstreamGroupID:   conn.UpstreamGroupID,
+					UpstreamGroupName: conn.UpstreamGroupName,
+					Status:            "failed",
+					Reason:            "remote_update_failed",
+					UpstreamCost:      pointerFloat64(upstreamCost),
+				})
+				continue
+			}
+			if repository, ok := s.connRepository.(RealConnectionGroupUpdater); ok {
+				if err := repository.UpdateRealConnectionGroups(ctx, conn, desiredIDs, desiredNames, nil, nil); err != nil {
+					log.Printf("[cost-guard] local connection update failed workspace=%s connection=%s err=%v", adminAccountID, conn.ID, err)
+					results = append(results, GroupRateCostGuardResult{
+						ConnectionID:      conn.ID,
+						AccountID:         conn.AdminAccountID,
+						AccountName:       conn.AdminAccountName,
+						UpstreamSiteID:    conn.UpstreamSiteID,
+						UpstreamGroupID:   conn.UpstreamGroupID,
+						UpstreamGroupName: conn.UpstreamGroupName,
+						Status:            "failed",
+						Reason:            "local_update_failed",
+						UpstreamCost:      pointerFloat64(upstreamCost),
+					})
+					continue
+				}
+			}
+		}
+		for _, ownID := range pauseDeletes {
+			if err := pauseRepo.DeleteCostGuardPause(ctx, userID, adminAccountID, conn.ID, ownID); err != nil {
+				log.Printf("[cost-guard] pause delete failed workspace=%s connection=%s own_group=%s err=%v", adminAccountID, conn.ID, ownID, err)
+			}
+		}
+		results = append(results, connectionResults...)
+		if changedConnection || len(pauseDeletes) > 0 {
+			log.Printf("[cost-guard] connection processed workspace=%s site=%s connection=%s changed=%t removed=%d restored=%d", adminAccountID, siteID, conn.ID, changedConnection, countCostGuardStatus(connectionResults, "removed"), countCostGuardStatus(connectionResults, "restored"))
+		}
+	}
+	return results
+}
+
+// RestoreGroupRateCostGuardPausedConnections restores every downstream group
+// that was previously removed by the cost guard.
+func (s *Service) RestoreGroupRateCostGuardPausedConnections(ctx context.Context, userID, adminAccountID string) []GroupRateCostGuardResult {
+	if s.repository == nil || s.connRepository == nil || s.platformService == nil {
+		return nil
+	}
+	pauseRepo, ok := s.connRepository.(CostGuardPauseRepository)
+	if !ok {
+		return nil
+	}
+	state, err := s.authenticatedState(ctx, userID, adminAccountID)
+	if err != nil || state == nil || state.Session.Platform != upstream.PlatformSub2API || !state.Session.IsAuthenticated() {
+		return nil
+	}
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil
+	}
+	pauses, err := pauseRepo.ListCostGuardPauses(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil
+	}
+	pausesByConnection := make(map[string][]CostGuardPause)
+	for _, pause := range pauses {
+		if pause.UserID != userID || pause.WorkspaceAdminAccountID != adminAccountID {
+			continue
+		}
+		pausesByConnection[pause.ConnectionID] = append(pausesByConnection[pause.ConnectionID], pause)
+	}
+	if len(pausesByConnection) == 0 {
+		return nil
+	}
+	downstreamGroups, err := s.platformService.FetchSub2APIAdminAllGroups(state.Session)
+	if err != nil {
+		return nil
+	}
+	downstreamByID := make(map[string]upstream.AdminGroupInfo, len(downstreamGroups))
+	for _, group := range downstreamGroups {
+		if strings.TrimSpace(group.ID) != "" {
+			downstreamByID[group.ID] = group
+		}
+	}
+	results := make([]GroupRateCostGuardResult, 0)
+	for _, conn := range connections {
+		paused := pausesByConnection[conn.ID]
+		if len(paused) == 0 {
+			continue
+		}
+		if conn.Status != "" && conn.Status != ConnectionStatusActive {
+			continue
+		}
+		if strings.TrimSpace(conn.AdminPlatform) != "" && !strings.EqualFold(conn.AdminPlatform, string(upstream.PlatformSub2API)) {
+			continue
+		}
+		currentIDs := append([]string(nil), conn.OwnGroupIDs...)
+		currentNames := append([]string(nil), conn.OwnGroupNames...)
+		nameByID := make(map[string]string, len(currentIDs))
+		for index, ownID := range currentIDs {
+			ownName := ownID
+			if index < len(currentNames) && strings.TrimSpace(currentNames[index]) != "" {
+				ownName = currentNames[index]
+			}
+			nameByID[ownID] = ownName
+		}
+		desiredIDs := append([]string(nil), currentIDs...)
+		desiredNames := append([]string(nil), currentNames...)
+		pauseDeletes := make([]string, 0, len(paused))
+		connectionResults := make([]GroupRateCostGuardResult, 0, len(paused))
+		appendGroup := func(ids, names []string, targetID, targetName string) ([]string, []string) {
+			if containsString(ids, targetID) {
+				return ids, names
+			}
+			ids = append(append([]string(nil), ids...), targetID)
+			names = append(append([]string(nil), names...), targetName)
+			return ids, names
+		}
+		for _, pause := range paused {
+			downstreamGroup, exists := downstreamByID[pause.OwnGroupID]
+			ownName := firstNonEmpty(pause.OwnGroupName, nameByID[pause.OwnGroupID], pause.OwnGroupID)
+			if !exists || downstreamGroup.Multiplier == nil {
+				connectionResults = append(connectionResults, GroupRateCostGuardResult{
+					ConnectionID:      conn.ID,
+					AccountID:         conn.AdminAccountID,
+					AccountName:       conn.AdminAccountName,
+					UpstreamSiteID:    conn.UpstreamSiteID,
+					UpstreamGroupID:   conn.UpstreamGroupID,
+					UpstreamGroupName: conn.UpstreamGroupName,
+					OwnGroupID:        pause.OwnGroupID,
+					OwnGroupName:      ownName,
+					Status:            "skipped",
+					Reason:            "missing_downstream_multiplier",
+				})
+				continue
+			}
+			desiredIDs, desiredNames = appendGroup(desiredIDs, desiredNames, pause.OwnGroupID, ownName)
+			pauseDeletes = append(pauseDeletes, pause.OwnGroupID)
+			connectionResults = append(connectionResults, GroupRateCostGuardResult{
+				ConnectionID:         conn.ID,
+				AccountID:            conn.AdminAccountID,
+				AccountName:          conn.AdminAccountName,
+				UpstreamSiteID:       conn.UpstreamSiteID,
+				UpstreamGroupID:      conn.UpstreamGroupID,
+				UpstreamGroupName:    conn.UpstreamGroupName,
+				OwnGroupID:           pause.OwnGroupID,
+				OwnGroupName:         ownName,
+				DownstreamMultiplier: downstreamGroup.Multiplier,
+				Status:               "restored",
+			})
+		}
+		if len(connectionResults) == 0 {
+			continue
+		}
+		changedConnection := !sameStringSet(desiredIDs, currentIDs)
+		if changedConnection {
+			if err := s.platformService.UpdateSub2APIAdminAccountGroupIDs(state.Session, conn.AdminAccountID, desiredIDs); err != nil {
+				log.Printf("[cost-guard] restore remote update failed workspace=%s connection=%s err=%v", adminAccountID, conn.ID, err)
+				results = append(results, GroupRateCostGuardResult{
+					ConnectionID:      conn.ID,
+					AccountID:         conn.AdminAccountID,
+					AccountName:       conn.AdminAccountName,
+					UpstreamSiteID:    conn.UpstreamSiteID,
+					UpstreamGroupID:   conn.UpstreamGroupID,
+					UpstreamGroupName: conn.UpstreamGroupName,
+					Status:            "failed",
+					Reason:            "remote_restore_failed",
+				})
+				continue
+			}
+			if repository, ok := s.connRepository.(RealConnectionGroupUpdater); ok {
+				if err := repository.UpdateRealConnectionGroups(ctx, conn, desiredIDs, desiredNames, nil, nil); err != nil {
+					log.Printf("[cost-guard] restore local update failed workspace=%s connection=%s err=%v", adminAccountID, conn.ID, err)
+					results = append(results, GroupRateCostGuardResult{
+						ConnectionID:      conn.ID,
+						AccountID:         conn.AdminAccountID,
+						AccountName:       conn.AdminAccountName,
+						UpstreamSiteID:    conn.UpstreamSiteID,
+						UpstreamGroupID:   conn.UpstreamGroupID,
+						UpstreamGroupName: conn.UpstreamGroupName,
+						Status:            "failed",
+						Reason:            "local_restore_failed",
+					})
+					continue
+				}
+			}
+		}
+		for _, ownID := range pauseDeletes {
+			if err := pauseRepo.DeleteCostGuardPause(ctx, userID, adminAccountID, conn.ID, ownID); err != nil {
+				log.Printf("[cost-guard] restore pause delete failed workspace=%s connection=%s own_group=%s err=%v", adminAccountID, conn.ID, ownID, err)
+			}
+		}
+		results = append(results, connectionResults...)
+		log.Printf("[cost-guard] restored workspace=%s connection=%s groups=%d changed=%t", adminAccountID, conn.ID, len(pauseDeletes), changedConnection)
+	}
+	return results
+}
+
+func summarizeCostGuardResults(results []GroupRateCostGuardResult) string {
+	if len(results) == 0 {
+		return ""
+	}
+	var removed, restored, skipped, failed int
+	for _, result := range results {
+		switch result.Status {
+		case "removed":
+			removed++
+		case "restored":
+			restored++
+		case "skipped":
+			skipped++
+		case "failed":
+			failed++
+		}
+	}
+	parts := make([]string, 0, 4)
+	if removed > 0 {
+		parts = append(parts, fmt.Sprintf("已移除 %d 个分组", removed))
+	}
+	if restored > 0 {
+		parts = append(parts, fmt.Sprintf("已恢复 %d 个分组", restored))
+	}
+	if skipped > 0 {
+		parts = append(parts, fmt.Sprintf("跳过 %d 个分组", skipped))
+	}
+	if failed > 0 {
+		parts = append(parts, fmt.Sprintf("失败 %d 个分组", failed))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "（亏本保护：" + strings.Join(parts, "；") + "）"
+}
+
+func countCostGuardStatus(results []GroupRateCostGuardResult, status string) int {
+	count := 0
+	for _, result := range results {
+		if result.Status == status {
+			count++
+		}
+	}
+	return count
+}
+
 func replaceTrailingMultiplier(name string, multiplier float64) (string, bool) {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -2285,6 +2863,15 @@ func filterEmptyStrings(ss []string) []string {
 		}
 	}
 	return result
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // defaultAutoPricingNotifyTemplate 自动调价成功通知的默认模板。

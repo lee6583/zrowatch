@@ -81,6 +81,7 @@ const (
 type TargetDispatchState struct {
 	Status      string `json:"status"`
 	Schedulable bool   `json:"schedulable"`
+	Priority    *int   `json:"priority,omitempty"`
 }
 
 // PolicyAssignment 对应 connection_health_policy_assignments 表：一条「target 显式绑定某条策略」

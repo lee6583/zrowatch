@@ -45,6 +45,28 @@ func (f *fakeFastDispatchActioner) UpdateSub2APIAdminAccountDispatch(_ upstream.
 	return f.state, nil
 }
 
+type priorityMirrorActioner struct {
+	calls []priorityUpdateCall
+	state map[string]upstream.Sub2APIAdminAccountState
+}
+
+func (f *priorityMirrorActioner) UpdateAdminTargetPriority(_ upstream.Session, targetID string, priority int) error {
+	f.calls = append(f.calls, priorityUpdateCall{targetID: targetID, priority: priority})
+	if f.state != nil {
+		st := f.state[targetID]
+		st.Priority = &priority
+		f.state[targetID] = st
+	}
+	return nil
+}
+
+func (f *priorityMirrorActioner) UpdateSub2APIAdminAccountPriority(_ upstream.Session, targetID string, priority int) (upstream.Sub2APIAdminAccountState, error) {
+	if err := f.UpdateAdminTargetPriority(upstream.Session{}, targetID, priority); err != nil {
+		return upstream.Sub2APIAdminAccountState{}, err
+	}
+	return f.state[targetID], nil
+}
+
 func dispatchTestService(repo *fakeRepository, actions *fakeSchedulingActioner, platform upstream.Platform) (*Service, string) {
 	schedulable := true
 	workspaceID := "workspace-1"
@@ -123,11 +145,51 @@ func TestUpdateTargetDispatchUsesFastAccountPath(t *testing.T) {
 	}
 }
 
+func TestUpdateTargetPriorityUpdatesOnlyPriorityAndReturnsLatestState(t *testing.T) {
+	repo := newFakeRepository()
+	stateReader := &fakeFastDispatchActioner{
+		statesByID: map[string]upstream.Sub2APIAdminAccountState{
+			"account-1": {Name: "remote account", Status: "active"},
+		},
+	}
+	priorityActions := &priorityMirrorActioner{state: stateReader.statesByID}
+	service := &Service{
+		repo:            repo,
+		mySites:         fakeMySitesReader{session: upstream.Session{Platform: upstream.PlatformSub2API}},
+		accounts:        fakeAdminAccountResolver{id: "workspace-1"},
+		dispatchStates:  stateReader,
+		priorityActions: priorityActions,
+	}
+	targetID := buildTargetID(string(upstream.PlatformSub2API), "workspace-1", "account-1")
+	repo.targetActionStates["user-1|workspace-1|"+targetID] = TargetActionState{
+		UserID: "user-1", AdminAccountID: "workspace-1", TargetID: targetID,
+		OriginalStatus: "active", LastAppliedStatus: "inactive",
+	}
+
+	state, err := service.UpdateTargetPriority(context.Background(), "user-1", targetID, 40999)
+	if err != nil {
+		t.Fatalf("update priority: %v", err)
+	}
+	if state.Priority == nil || *state.Priority != 40999 {
+		t.Fatalf("expected returned priority=40999, got %#v", state.Priority)
+	}
+	if len(priorityActions.calls) != 1 || priorityActions.calls[0].priority != 40999 {
+		t.Fatalf("unexpected priority calls: %#v", priorityActions.calls)
+	}
+	if len(stateReader.getAccountIDs) != 0 {
+		t.Fatalf("direct priority update must not reread account state, got %#v", stateReader.getAccountIDs)
+	}
+	if _, ok := repo.targetActionStates["user-1|workspace-1|"+targetID]; !ok {
+		t.Fatal("manual priority change must not clear existing automation snapshot")
+	}
+}
+
 func TestBoundDispatchAccountsReadsOnlyActiveBoundSub2APIAccounts(t *testing.T) {
 	schedulable := true
+	priority := 17
 	reader := &fakeFastDispatchActioner{
 		statesByID: map[string]upstream.Sub2APIAdminAccountState{
-			"account-1": {Name: "remote account", Status: "active", Schedulable: &schedulable},
+			"account-1": {Name: "remote account", Status: "active", Schedulable: &schedulable, Priority: &priority},
 		},
 		getErrors: map[string]error{"missing": &upstream.RequestError{StatusCode: 404}},
 	}
@@ -160,6 +222,9 @@ func TestBoundDispatchAccountsReadsOnlyActiveBoundSub2APIAccounts(t *testing.T) 
 	available := byID["account-1"]
 	if !available.Available || available.Name != "remote account" || available.Status != "active" || available.Schedulable == nil || !*available.Schedulable {
 		t.Fatalf("unexpected available account: %#v", available)
+	}
+	if available.Priority == nil || *available.Priority != 17 {
+		t.Fatalf("expected priority=17, got %#v", available.Priority)
 	}
 	if available.TargetID != buildTargetID(string(upstream.PlatformSub2API), "workspace-1", "account-1") {
 		t.Fatalf("unexpected target id: %q", available.TargetID)

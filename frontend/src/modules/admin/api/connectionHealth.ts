@@ -41,6 +41,15 @@ type ApiErrorPayload = {
   message?: string
 }
 
+const parseJsonPayload = <T>(text: string): T & ApiErrorPayload => {
+  if (!text) return {} as T & ApiErrorPayload
+  try {
+    return JSON.parse(text) as T & ApiErrorPayload
+  } catch {
+    return { message: 'admin.connectionHealth.errors.request' } as T & ApiErrorPayload
+  }
+}
+
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   let response: Response
   try {
@@ -58,7 +67,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
   }
 
   const text = await response.text()
-  const payload = text ? (JSON.parse(text) as T & ApiErrorPayload) : ({} as T & ApiErrorPayload)
+  const payload = parseJsonPayload<T>(text)
 
   if (!response.ok) {
     if (isUnauthorizedApiResponse(response.status, payload)) {
@@ -95,6 +104,12 @@ export const saveGroupRateMonitorSettings = async (input: GroupRateMonitorSettin
   requestJson<GroupRateMonitorSettings>('/connection-health/group-rate-monitor/settings', {
     method: 'PUT',
     body: JSON.stringify(input),
+  })
+
+export const updateGroupRateMonitorCostGuard = async (enabled: boolean): Promise<{ enabled: boolean }> =>
+  requestJson<{ enabled: boolean }>('/connection-health/group-rate-monitor/cost-guard', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
   })
 
 export const getGroupRateMonitorSummaries = async (): Promise<GroupRateMonitorSummary[]> =>
@@ -164,6 +179,12 @@ export const updateTargetDispatch = async (targetId: string, enabled: boolean): 
   requestJson<TargetDispatchState>(`/connection-health/targets/${encodeURIComponent(targetId)}/dispatch`, {
     method: 'PUT',
     body: JSON.stringify({ enabled }),
+  })
+
+export const updateTargetPriority = async (targetId: string, priority: number): Promise<TargetDispatchState> =>
+  requestJson<TargetDispatchState>(`/connection-health/targets/${encodeURIComponent(targetId)}/priority`, {
+    method: 'PUT',
+    body: JSON.stringify({ priority }),
   })
 
 export const getAdminGroupPolicyConfiguration = async (adminGroupId: string): Promise<AdminGroupPolicyConfiguration> =>

@@ -193,16 +193,18 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_status text NOT NULL DEFAULT ''`,
 		`ALTER TABLE connection_health_target_action_states ADD COLUMN IF NOT EXISTS pending_weight integer NULL`,
 
-		`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_settings (
+			`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_settings (
 			user_id text NOT NULL,
-			admin_account_id text NOT NULL DEFAULT '',
-			enabled boolean NOT NULL DEFAULT false,
+				admin_account_id text NOT NULL DEFAULT '',
+				enabled boolean NOT NULL DEFAULT false,
+				cost_guard_enabled boolean NOT NULL DEFAULT false,
 			probe_interval_seconds integer NOT NULL DEFAULT 30,
 			failure_threshold integer NOT NULL DEFAULT 2,
 			default_model text NOT NULL DEFAULT '',
 			updated_at timestamptz NOT NULL DEFAULT now(),
-			PRIMARY KEY (user_id, admin_account_id)
-		)`,
+				PRIMARY KEY (user_id, admin_account_id)
+			)`,
+			`ALTER TABLE connection_health_group_rate_monitor_settings ADD COLUMN IF NOT EXISTS cost_guard_enabled boolean NOT NULL DEFAULT false`,
 		`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_overrides (
 			user_id text NOT NULL,
 			admin_account_id text NOT NULL DEFAULT '',

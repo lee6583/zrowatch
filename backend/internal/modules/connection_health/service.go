@@ -125,6 +125,7 @@ type BoundDispatchAccountState struct {
 	Name              string `json:"name"`
 	Status            string `json:"status"`
 	Schedulable       *bool  `json:"schedulable,omitempty"`
+	Priority          *int   `json:"priority,omitempty"`
 	TargetID          string `json:"targetId"`
 	Available         bool   `json:"available"`
 	UnavailableReason string `json:"unavailableReason,omitempty"`
@@ -202,6 +203,18 @@ func (s *Service) BoundDispatchAccounts(ctx context.Context, userID string) ([]B
 			}
 			results[index].Status = state.Status
 			results[index].Schedulable = state.Schedulable
+			results[index].Priority = state.Priority
+			if s.balancePauses != nil {
+				paused, pauseErr := s.balancePauses.IsAccountBalancePausedForWorkspace(ctx, userID, adminAccountID, results[index].ID)
+				if pauseErr != nil {
+					results[index].UnavailableReason = "unavailable"
+					return
+				}
+				if paused {
+					results[index].UnavailableReason = "balance_suspended"
+					return
+				}
+			}
 			results[index].Available = true
 		}(index)
 	}
@@ -282,7 +295,15 @@ func (s *Service) UpdateTargetDispatch(ctx context.Context, userID, targetID str
 	if err := s.clearTargetAutomationTracking(ctx, userID, workspaceID, targetID); err != nil {
 		return TargetDispatchState{}, err
 	}
-	return TargetDispatchState{Status: status, Schedulable: enabled}, nil
+	result := TargetDispatchState{Status: status, Schedulable: enabled}
+	if s.dispatchStates != nil {
+		state, stateErr := s.dispatchStates.GetSub2APIAdminAccountState(session, target.AccountID)
+		if stateErr != nil {
+			return TargetDispatchState{}, stateErr
+		}
+		result.Priority = state.Priority
+	}
+	return result, nil
 }
 
 func (s *Service) updateTargetDispatchFast(ctx context.Context, userID, targetID string, enabled bool) (TargetDispatchState, error) {
@@ -322,7 +343,65 @@ func (s *Service) updateTargetDispatchFast(ctx context.Context, userID, targetID
 	if err := s.clearTargetAutomationTracking(ctx, userID, workspaceID, targetID); err != nil {
 		return TargetDispatchState{}, err
 	}
-	return TargetDispatchState{Status: state.Status, Schedulable: *state.Schedulable}, nil
+	return TargetDispatchState{Status: state.Status, Schedulable: *state.Schedulable, Priority: state.Priority}, nil
+}
+
+func (s *Service) UpdateTargetPriority(ctx context.Context, userID, targetID string, priority int) (TargetDispatchState, error) {
+	if s.priorityActions == nil || s.repo == nil {
+		return TargetDispatchState{}, requestError(ErrorUnknown)
+	}
+	session, _, accountID, err := s.resolveDispatchTarget(ctx, userID, targetID)
+	if err != nil {
+		return TargetDispatchState{}, err
+	}
+
+	release, err := s.repo.AcquireTargetLease(ctx, targetID)
+	if err != nil {
+		return TargetDispatchState{}, err
+	}
+	defer release()
+
+	if directActions, ok := s.priorityActions.(Sub2APITargetPriorityActioner); ok {
+		state, updateErr := directActions.UpdateSub2APIAdminAccountPriority(session, accountID, priority)
+		if updateErr != nil {
+			var upstreamErr *upstream.RequestError
+			if errors.As(updateErr, &upstreamErr) {
+				return TargetDispatchState{}, requestError(ErrorProbeTargetNotFound)
+			}
+			return TargetDispatchState{}, updateErr
+		}
+		if state.Priority == nil {
+			state.Priority = &priority
+		}
+		return TargetDispatchState{
+			Status:      state.Status,
+			Schedulable: state.Schedulable != nil && *state.Schedulable,
+			Priority:    state.Priority,
+		}, nil
+	}
+
+	if s.dispatchStates == nil {
+		return TargetDispatchState{}, requestError(ErrorUnknown)
+	}
+	if err := s.priorityActions.UpdateAdminTargetPriority(session, accountID, priority); err != nil {
+		var upstreamErr *upstream.RequestError
+		if errors.As(err, &upstreamErr) {
+			return TargetDispatchState{}, requestError(ErrorProbeTargetNotFound)
+		}
+		return TargetDispatchState{}, err
+	}
+	state, err := s.dispatchStates.GetSub2APIAdminAccountState(session, accountID)
+	if err != nil {
+		var upstreamErr *upstream.RequestError
+		if errors.As(err, &upstreamErr) {
+			return TargetDispatchState{}, requestError(ErrorProbeTargetNotFound)
+		}
+		return TargetDispatchState{}, err
+	}
+	if state.Priority == nil {
+		state.Priority = &priority
+	}
+	return TargetDispatchState{Status: state.Status, Schedulable: state.Schedulable != nil && *state.Schedulable, Priority: state.Priority}, nil
 }
 
 func (s *Service) clearTargetAutomationTracking(ctx context.Context, userID, workspaceID, targetID string) error {

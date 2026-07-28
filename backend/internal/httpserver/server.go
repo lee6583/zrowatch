@@ -277,12 +277,21 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		strategy, err := settingsService.GetStrategyForWorkspace(ctx, userID, adminAccountID)
 		if err != nil {
 			log.Printf("[alert] 加载工作区通知策略失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
-			return
+		} else {
+			checkBalanceWarning(ctx, settingsService, balanceControlService, strategy, userID, adminAccountID, siteID, siteName, newMetrics)
 		}
-		checkBalanceWarning(ctx, settingsService, balanceControlService, strategy, userID, adminAccountID, siteID, siteName, newMetrics)
-		checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, renameResults)
+		costGuardEnabled := false
+		if settings, settingsErr := connHealthService.GroupRateMonitorSettings(ctx, userID); settingsErr != nil {
+			log.Printf("[cost-guard] 加载亏本保护设置失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, settingsErr)
+		} else {
+			costGuardEnabled = settings.CostGuardEnabled
+		}
 		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
 		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
+		costGuardResults := mySitesService.ApplyGroupRateCostGuardAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, costGuardEnabled)
+		if err == nil {
+			checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, renameResults, costGuardResults)
+		}
 	}
 
 	settings.RegisterRoutes(server.mux, settingsService)
@@ -577,7 +586,7 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, guard *bala
 
 // checkMultiplierChanges 对比同步前后的分组倍率，任何变化都发送通知。
 // 使用发生同步的工作区策略，由 strategy.EnableMultiplierAlert 控制。
-func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, renameResults []my_sites.AccountRenameResult) {
+func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, renameResults []my_sites.AccountRenameResult, costGuardResults []my_sites.GroupRateCostGuardResult) {
 	_ = siteID
 	if !strategy.EnableMultiplierAlert || len(strategy.MultiplierNotifyBotIDs) == 0 {
 		return
@@ -602,6 +611,7 @@ func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy
 		}
 		msg := formatMultiplierChange(siteName, g.Name, oldVal, *g.Multiplier, strategy.MultiplierTemplate)
 		msg += formatAccountRenameSummary(g.Name, renameResults)
+		msg += formatCostGuardSummary(siteID, g.Name, costGuardResults)
 		log.Printf("[alert] 倍率变更触发 site=%s group=%s old=%.4f new=%.4f", siteName, g.Name, oldVal, *g.Multiplier)
 		svc.SendToBotsForWorkspace(ctx, userID, adminAccountID, strategy.MultiplierNotifyBotIDs, msg)
 	}
@@ -630,6 +640,46 @@ func formatAccountRenameSummary(groupName string, results []my_sites.AccountRena
 		return ""
 	}
 	return "（改名结果：" + strings.Join(parts, "；") + "）"
+}
+
+func formatCostGuardSummary(siteID, groupName string, results []my_sites.GroupRateCostGuardResult) string {
+	parts := make([]string, 0)
+	for _, result := range results {
+		if result.UpstreamSiteID != siteID || result.UpstreamGroupName != groupName {
+			continue
+		}
+		switch result.Status {
+		case "removed":
+			label := firstNonEmpty(result.OwnGroupName, result.OwnGroupID)
+			if result.AccountName != "" {
+				label = result.AccountName + " / " + label
+			}
+			parts = append(parts, "已移除 "+label)
+		case "restored":
+			label := firstNonEmpty(result.OwnGroupName, result.OwnGroupID)
+			if result.AccountName != "" {
+				label = result.AccountName + " / " + label
+			}
+			parts = append(parts, "已恢复 "+label)
+		case "skipped":
+			parts = append(parts, "跳过 "+firstNonEmpty(result.OwnGroupName, result.OwnGroupID))
+		case "failed":
+			parts = append(parts, "失败 "+firstNonEmpty(result.OwnGroupName, result.OwnGroupID))
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "（亏本保护：" + strings.Join(parts, "；") + "）"
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 const defaultBalanceTemplate = "【余额预警】{siteName} 站点余额（CNY）已不足 {threshold} 元，当前余额为 {balance} 元。"

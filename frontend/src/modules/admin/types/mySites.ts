@@ -201,6 +201,8 @@ export interface RealConnection {
   adminAccountName: string
   ownGroupIds: string[]
   ownGroupNames?: string[]
+  costGuardPausedOwnGroupIds?: string[]
+  costGuardPausedOwnGroupNames?: string[]
   groupType: string
   provisioningMode?: 'legacy' | 'managed' | 'existing' | string
   status?: string

@@ -9,7 +9,7 @@ import { Select } from '@/components/ui/select'
 import { Tooltip } from '@/components/ui/tooltip'
 import { getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect, updateRealConnectionGroups } from '../api/mySites'
 import { getDashboardAdminStatus } from '../api/dashboardAdmin'
-import { getBoundDispatchAccounts, getGroupRateMonitorSettings, getGroupRateMonitorSummaries, probeGroupRateMonitor, saveGroupRateMonitorSettings, updateTargetDispatch } from '../api/connectionHealth'
+import { getBoundDispatchAccounts, getGroupRateMonitorSettings, getGroupRateMonitorSummaries, probeGroupRateMonitor, saveGroupRateMonitorSettings, updateGroupRateMonitorCostGuard, updateTargetDispatch, updateTargetPriority } from '../api/connectionHealth'
 import { listUpstreamSites, syncAllUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
@@ -81,14 +81,20 @@ const dispatchAccountsById = ref<Map<string, BoundDispatchAccountState>>(new Map
 const dispatchLoadingAccountIds = ref<Set<string>>(new Set())
 const isLoadingDispatchAccounts = ref(false)
 const dispatchErrorKey = ref('')
+const priorityDraftByAccountId = ref<Map<string, string>>(new Map())
+const priorityLoadingAccountIds = ref<Set<string>>(new Set())
+const priorityErrorKey = ref('')
 const upstreamSiteURLsById = ref<Map<string, string>>(new Map())
 const groupRateHealthSummaries = ref<Map<string, GroupRateMonitorSummary>>(new Map())
 const isLoadingHealthSummaries = ref(false)
 const healthSummaryErrorKey = ref('')
 const probingHealthGroups = ref<Set<string>>(new Set())
+const healthSettingsSnapshot = ref<GroupRateMonitorSettings | null>(null)
 const isHealthSettingsOpen = ref(false)
 const isLoadingHealthSettings = ref(false)
+const isLoadingHealthSettingsSnapshot = ref(false)
 const isSavingHealthSettings = ref(false)
+const isTogglingCostGuard = ref(false)
 const healthSettingsErrorKey = ref('')
 const healthSettingsDraft = ref<GroupRateMonitorSettings | null>(null)
 const healthSettingsGroupType = ref('')
@@ -163,8 +169,30 @@ const ownGroupsByName = computed(() => new Map(
   ownGroups.value.map(group => [group.groupName, group]),
 ))
 
+const ownGroupsById = computed(() => new Map(
+  ownGroups.value.map(group => [String(group.id), group]),
+))
+
 const downstreamGroupsForRate = (rate: GroupRate): Array<{ key: string; name: string; multiplier: number | null }> => {
+  const connections = realConnectionsForRate(rate)
   const seen = new Set<string>()
+  if (connections.length > 0) {
+    return connections.flatMap(connection => (connection.ownGroupIds ?? []).flatMap((groupId, index) => {
+      const normalizedId = String(groupId).trim()
+      const configuredName = connection.ownGroupNames?.[index]?.trim() ?? ''
+      const group = ownGroupsById.value.get(normalizedId) ?? ownGroupsByName.value.get(configuredName)
+      const name = configuredName || group?.groupName || normalizedId
+      const key = normalizedId || name
+      if (!key || seen.has(key)) return []
+      seen.add(key)
+      return [{
+        key,
+        name,
+        multiplier: group?.multiplier ?? null,
+      }]
+    }))
+  }
+
   return mappedOwnGroupsForRate(rate).flatMap((name) => {
     const normalizedName = name.trim()
     if (!normalizedName || seen.has(normalizedName)) return []
@@ -196,13 +224,50 @@ const realConnectionForRate = (rate: GroupRate): RealConnection | undefined =>
     (c.upstreamGroupId === rate.groupId || ((!c.upstreamGroupId || !rate.groupId) && c.upstreamGroupName === rate.groupName))
   ))
 
+const realConnectionsForRate = (rate: GroupRate): RealConnection[] =>
+  realConnectionsData.value.filter(c => (
+    c.upstreamSiteId === rate.siteId &&
+    (c.upstreamGroupId === rate.groupId || ((!c.upstreamGroupId || !rate.groupId) && c.upstreamGroupName === rate.groupName))
+  ))
+
 const isSub2APIPlatform = (platform: string | undefined): boolean => platform?.toLowerCase().includes('sub2') ?? false
+
+const normalizedDispatchPriority = (account: BoundDispatchAccountState | undefined): number => {
+  const value = account?.priority
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 1
+}
+
+const accountIdForRate = (rate: GroupRate): string | null => {
+  const connection = realConnectionForRate(rate)
+  if (!connection) return null
+  return String(connection.adminAccountId)
+}
+
+const mergeDispatchAccount = (account: BoundDispatchAccountState) => {
+  const accountId = String(account.id)
+  const nextAccounts = new Map(dispatchAccountsById.value)
+  nextAccounts.set(accountId, account)
+  dispatchAccountsById.value = nextAccounts
+
+  const nextDrafts = new Map(priorityDraftByAccountId.value)
+  nextDrafts.set(accountId, String(normalizedDispatchPriority(account)))
+  priorityDraftByAccountId.value = nextDrafts
+}
 
 const dispatchAccountForRate = (rate: GroupRate): BoundDispatchAccountState | undefined => {
   const connection = realConnectionForRate(rate)
   if (!connection || !isSub2APIPlatform(connection.adminPlatform || adminPlatform.value)) return undefined
   return dispatchAccountsById.value.get(String(connection.adminAccountId))
 }
+
+const isBalanceSuspendedAccount = (account: BoundDispatchAccountState | undefined): boolean => account?.unavailableReason === 'balance_suspended'
+
+const isBalanceSuspendedRate = (rate: GroupRate): boolean => (
+  realConnectionsForRate(rate).some(connection => (
+    isSub2APIPlatform(connection.adminPlatform || adminPlatform.value) &&
+    isBalanceSuspendedAccount(dispatchAccountsById.value.get(String(connection.adminAccountId)))
+  ))
+)
 
 const supportsDispatch = (rate: GroupRate): boolean => {
   const connection = realConnectionForRate(rate)
@@ -215,7 +280,7 @@ const hasDispatchState = (rate: GroupRate): boolean => {
 }
 
 const isDispatchEnabled = (account: BoundDispatchAccountState | undefined): boolean => {
-  return account?.schedulable === true
+  return account?.schedulable === true && !isBalanceSuspendedAccount(account)
 }
 
 const isDispatchEnabledForRate = (rate: GroupRate): boolean => isDispatchEnabled(dispatchAccountForRate(rate))
@@ -229,6 +294,39 @@ const isDispatchUnavailable = (rate: GroupRate): boolean => (
   supportsDispatch(rate) && !isLoadingDispatchAccounts.value && !hasDispatchState(rate)
 )
 
+const isPriorityUpdating = (rate: GroupRate): boolean => {
+  const accountId = accountIdForRate(rate)
+  return accountId ? priorityLoadingAccountIds.value.has(accountId) : false
+}
+
+const isPriorityUnavailable = (rate: GroupRate): boolean => (
+  supportsDispatch(rate) && !isLoadingDispatchAccounts.value && !hasDispatchState(rate)
+)
+
+const priorityStatusLabel = (rate: GroupRate): string => {
+  if (isPriorityUpdating(rate)) return t('admin.groupRates.priority.updating')
+  if (isLoadingDispatchAccounts.value) return t('admin.groupRates.priority.loading')
+  if (isPriorityUnavailable(rate)) return t('admin.groupRates.priority.unavailable')
+  return t('admin.groupRates.priority.edit')
+}
+
+const priorityValueForRate = (rate: GroupRate): string => {
+  const account = dispatchAccountForRate(rate)
+  if (!account) return String(1)
+  const accountId = String(account.id)
+  return priorityDraftByAccountId.value.get(accountId) ?? String(normalizedDispatchPriority(account))
+}
+
+const setPriorityDraft = (accountId: string, value: string) => {
+  const nextDrafts = new Map(priorityDraftByAccountId.value)
+  nextDrafts.set(accountId, value)
+  priorityDraftByAccountId.value = nextDrafts
+}
+
+const resetPriorityDraft = (accountId: string, account?: BoundDispatchAccountState) => {
+  setPriorityDraft(accountId, String(normalizedDispatchPriority(account)))
+}
+
 const dispatchActionLabel = (rate: GroupRate): string => t(
   isDispatchEnabledForRate(rate) ? 'admin.groupRates.dispatch.disableForRate' : 'admin.groupRates.dispatch.enableForRate',
   { site: rate.siteName, group: rate.groupName },
@@ -237,6 +335,7 @@ const dispatchActionLabel = (rate: GroupRate): string => t(
 const dispatchStatusLabel = (rate: GroupRate): string => {
   if (isDispatchUpdating(rate)) return t('admin.groupRates.dispatch.updating')
   if (isLoadingDispatchAccounts.value) return t('admin.groupRates.dispatch.loading')
+  if (isBalanceSuspendedRate(rate)) return t('admin.groupRates.health.status.exhausted')
   if (isDispatchUnavailable(rate)) {
     return t(dispatchAccountForRate(rate)?.unavailableReason === 'not_found'
       ? 'admin.groupRates.dispatch.accountMissing'
@@ -255,13 +354,29 @@ const disconnectConnections = computed(() => disconnectingRate.value
       (c.upstreamGroupId === disconnectingRate.value?.groupId || ((!c.upstreamGroupId || !disconnectingRate.value?.groupId) && c.upstreamGroupName === disconnectingRate.value?.groupName))
     ))
   : [])
+
+const intendedDownstreamGroupsForConnection = (connection: RealConnection): Array<{ id: string; name: string }> => {
+  const result: Array<{ id: string; name: string }> = []
+  const seen = new Set<string>()
+  const appendGroups = (ids: string[] | undefined, names: string[] | undefined) => {
+    for (const [index, rawId] of (ids ?? []).entries()) {
+      const id = String(rawId).trim()
+      if (!id || seen.has(id)) continue
+      seen.add(id)
+      result.push({ id, name: names?.[index]?.trim() || id })
+    }
+  }
+  appendGroups(connection.ownGroupIds, connection.ownGroupNames)
+  appendGroups(connection.costGuardPausedOwnGroupIds, connection.costGuardPausedOwnGroupNames)
+  return result
+}
+
 const disconnectTargets = computed(() => disconnectConnections.value.flatMap((connection) => {
-  const names = connection.ownGroupNames ?? []
-  return connection.ownGroupIds.map((groupId, index) => ({
-    key: `${connection.id}:${groupId}`,
+  return intendedDownstreamGroupsForConnection(connection).map(group => ({
+    key: `${connection.id}:${group.id}`,
     connectionId: connection.id,
-    groupId,
-    name: names[index] || groupId,
+    groupId: group.id,
+    name: group.name,
     accountName: connection.adminAccountName,
   }))
 }))
@@ -272,9 +387,7 @@ const connectionBeingEdited = computed(() => connectionEditingRate.value ? realC
 const loadRealConnections = async () => {
   try {
     realConnectionsData.value = await listRealConnections()
-  } catch {
-    realConnectionsData.value = []
-  }
+  } catch {}
 }
 
 const loadAdminPlatform = async () => {
@@ -322,6 +435,7 @@ const healthSlotsForRate = (rate: GroupRate): Array<GroupRateProbeCycle | null> 
 }
 
 const healthStatusLabel = (rate: GroupRate): string => {
+  if (isBalanceSuspendedRate(rate)) return t('admin.groupRates.health.status.exhausted')
   const summary = healthSummaryForRate(rate)
   if (!summary || !summary.model) return t('admin.groupRates.health.status.unconfigured')
   if (summary.stale) return t('admin.groupRates.health.status.stale')
@@ -329,6 +443,7 @@ const healthStatusLabel = (rate: GroupRate): string => {
 }
 
 const healthStatusClasses = (rate: GroupRate): string => {
+  if (isBalanceSuspendedRate(rate)) return 'text-red-500'
   const summary = healthSummaryForRate(rate)
   if (!summary || !summary.model || summary.stale || summary.status === 'unavailable' || summary.status === 'unconfigured') {
     return 'text-muted-foreground'
@@ -355,7 +470,8 @@ const flashHealthStatus = (rate: GroupRate) => {
   }, 900))
 }
 
-const healthBarClasses = (event: GroupRateProbeCycle | null, stale: boolean): string => {
+const healthBarClasses = (event: GroupRateProbeCycle | null, stale: boolean, balanceSuspended = false): string => {
+  if (balanceSuspended) return 'bg-red-500'
   if (!event) return 'bg-muted'
   const opacity = stale ? ' opacity-40' : ''
   if (event.status === 'healthy') return `bg-emerald-500${opacity}`
@@ -413,8 +529,10 @@ const stopHealthPolling = () => {
 const startHealthPolling = () => {
   stopHealthPolling()
   if (statusFilter.value !== 'mapped' || document.visibilityState === 'hidden') return
-  void loadHealthSummaries(true)
-  healthPollingTimer = setInterval(() => void loadHealthSummaries(), 10_000)
+  void Promise.all([loadHealthSummaries(true), loadRealConnections()])
+  healthPollingTimer = setInterval(() => {
+    void Promise.all([loadHealthSummaries(), loadRealConnections()])
+  }, 10_000)
 }
 
 const handleVisibilityChange = () => {
@@ -427,13 +545,8 @@ const openHealthSettings = async () => {
   isLoadingHealthSettings.value = true
   healthSettingsErrorKey.value = ''
   try {
-    const settings = await getGroupRateMonitorSettings()
-    healthSettingsDraft.value = {
-      ...settings,
-      typeDefaults: settings.typeDefaults.map(item => ({ ...item })),
-      groups: settings.groups.map(group => ({ ...group })),
-      restore: { ...settings.restore },
-    }
+    const settings = await loadHealthSettingsSnapshot(true)
+    healthSettingsDraft.value = cloneHealthSettings(settings)
     healthSettingsGroupType.value = healthSettingsGroupTypes.value[0] ?? ''
   } catch (error) {
     healthSettingsErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsLoadFailed'
@@ -449,46 +562,88 @@ const closeHealthSettings = () => {
   healthSettingsErrorKey.value = ''
 }
 
+const cloneHealthSettings = (settings: GroupRateMonitorSettings): GroupRateMonitorSettings => ({
+  ...settings,
+  typeDefaults: settings.typeDefaults.map(item => ({ ...item })),
+  groups: settings.groups.map(group => ({ ...group })),
+  restore: { ...settings.restore },
+})
+
+const buildHealthSettingsInput = (settings: GroupRateMonitorSettings) => ({
+  enabled: settings.enabled,
+  costGuardEnabled: settings.costGuardEnabled,
+  probeIntervalSeconds: Number(settings.probeIntervalSeconds),
+  failureThreshold: Number(settings.failureThreshold),
+  defaultModel: settings.defaultModel.trim(),
+  typeDefaults: settings.typeDefaults.map(item => ({
+    groupType: item.groupType,
+    enabled: item.enabled,
+    probeIntervalSeconds: Number(item.probeIntervalSeconds),
+    failureThreshold: Number(item.failureThreshold),
+    model: item.model.trim(),
+  })),
+  overrides: settings.groups.map(group => ({
+    upstreamSiteId: group.upstreamSiteId,
+    upstreamGroupId: group.upstreamGroupId,
+    upstreamGroupName: group.upstreamGroupName,
+    enabled: group.enabled,
+    model: group.model.trim(),
+    probeIntervalSeconds: group.probeIntervalSeconds,
+    failureThreshold: group.failureThreshold,
+  })),
+})
+
+const loadHealthSettingsSnapshot = async (force = false): Promise<GroupRateMonitorSettings> => {
+  if (healthSettingsSnapshot.value && !force) return healthSettingsSnapshot.value
+  isLoadingHealthSettingsSnapshot.value = true
+  try {
+    const settings = await getGroupRateMonitorSettings()
+    healthSettingsSnapshot.value = cloneHealthSettings(settings)
+    return healthSettingsSnapshot.value
+  } finally {
+    isLoadingHealthSettingsSnapshot.value = false
+  }
+}
+
 const saveHealthSettings = async () => {
   const draft = healthSettingsDraft.value
   if (!draft || isSavingHealthSettings.value) return
   isSavingHealthSettings.value = true
   healthSettingsErrorKey.value = ''
   try {
-    const saved = await saveGroupRateMonitorSettings({
-      enabled: draft.typeDefaults.some(item => item.enabled),
-      probeIntervalSeconds: Number(draft.probeIntervalSeconds),
-      failureThreshold: Number(draft.failureThreshold),
-      defaultModel: draft.defaultModel.trim(),
-      typeDefaults: draft.typeDefaults.map(item => ({
-        groupType: item.groupType,
-        enabled: item.enabled,
-        probeIntervalSeconds: Number(item.probeIntervalSeconds),
-        failureThreshold: Number(item.failureThreshold),
-        model: item.model.trim(),
-      })),
-      overrides: draft.groups.map(group => ({
-        upstreamSiteId: group.upstreamSiteId,
-        upstreamGroupId: group.upstreamGroupId,
-        upstreamGroupName: group.upstreamGroupName,
-        enabled: group.enabled,
-        model: group.model.trim(),
-        probeIntervalSeconds: group.probeIntervalSeconds,
-        failureThreshold: group.failureThreshold,
-      })),
-    })
-    healthSettingsDraft.value = {
-      ...saved,
-      typeDefaults: saved.typeDefaults.map(item => ({ ...item })),
-      groups: saved.groups.map(group => ({ ...group })),
-      restore: { ...saved.restore },
-    }
+    const saved = await saveGroupRateMonitorSettings(buildHealthSettingsInput(draft))
+    healthSettingsSnapshot.value = cloneHealthSettings(saved)
+    healthSettingsDraft.value = cloneHealthSettings(saved)
     closeHealthSettings()
     await loadHealthSummaries(true)
   } catch (error) {
     healthSettingsErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsSaveFailed'
   } finally {
     isSavingHealthSettings.value = false
+  }
+}
+
+const toggleCostGuardEnabled = async () => {
+  if (isLoadingHealthSettingsSnapshot.value || isTogglingCostGuard.value) return
+  isTogglingCostGuard.value = true
+  healthSettingsErrorKey.value = ''
+  healthSummaryErrorKey.value = ''
+  try {
+    const settings = await loadHealthSettingsSnapshot()
+    const result = await updateGroupRateMonitorCostGuard(!settings.costGuardEnabled)
+    healthSettingsSnapshot.value = cloneHealthSettings({
+      ...settings,
+      costGuardEnabled: result.enabled,
+    })
+    if (healthSettingsDraft.value) {
+      healthSettingsDraft.value.costGuardEnabled = result.enabled
+    }
+  } catch (error) {
+    const errorKey = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsSaveFailed'
+    healthSettingsErrorKey.value = errorKey
+    healthSummaryErrorKey.value = errorKey
+  } finally {
+    isTogglingCostGuard.value = false
   }
 }
 
@@ -543,9 +698,7 @@ const probeHealthRate = async (rate: GroupRate) => {
     const summaries = new Map(groupRateHealthSummaries.value)
     summaries.set(key, response.summary)
     groupRateHealthSummaries.value = summaries
-    const accounts = new Map(dispatchAccountsById.value)
-    for (const account of response.dispatchAccounts) accounts.set(String(account.id), account)
-    dispatchAccountsById.value = accounts
+    for (const account of response.dispatchAccounts) mergeDispatchAccount(account)
     flashHealthStatus(rate)
   } catch (error) {
     healthSummaryErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.probeFailed'
@@ -616,6 +769,7 @@ const submitSearch = () => {
 }
 
 watch(statusFilter, (status) => {
+  if (status === 'mapped') void loadHealthSettingsSnapshot().catch(() => undefined)
   if (status === 'mapped') startHealthPolling()
   else stopHealthPolling()
 })
@@ -644,7 +798,7 @@ watch(isAnyDialogOpen, async (open) => {
 onMounted(() => {
   document.addEventListener('keydown', handleDialogKeydown)
 	document.addEventListener('visibilitychange', handleVisibilityChange)
-	void Promise.all([
+  void Promise.all([
     loadRates(),
     loadRealConnections(),
     loadAdminPlatform(),
@@ -652,6 +806,7 @@ onMounted(() => {
     loadDispatchAccounts(),
     loadMappingOptions().catch(() => undefined),
   ])
+  if (statusFilter.value === 'mapped') void loadHealthSettingsSnapshot().catch(() => undefined)
 	if (statusFilter.value === 'mapped') startHealthPolling()
 })
 
@@ -886,12 +1041,17 @@ const loadDispatchAccounts = async () => {
   try {
     const states = await getBoundDispatchAccounts()
     const accounts = new Map<string, BoundDispatchAccountState>()
+    const drafts = new Map<string, string>()
     for (const account of states) {
-      accounts.set(String(account.id), account)
+      const accountId = String(account.id)
+      accounts.set(accountId, account)
+      drafts.set(accountId, String(normalizedDispatchPriority(account)))
     }
     dispatchAccountsById.value = accounts
+    priorityDraftByAccountId.value = drafts
   } catch {
     dispatchAccountsById.value = new Map()
+    priorityDraftByAccountId.value = new Map()
     dispatchErrorKey.value = 'admin.groupRates.dispatch.loadFailed'
   } finally {
     isLoadingDispatchAccounts.value = false
@@ -991,6 +1151,7 @@ const toggleDispatch = async (rate: GroupRate) => {
   const connection = realConnectionForRate(rate)
   const account = dispatchAccountForRate(rate)
   if (!connection || !account || !supportsDispatch(rate)) return
+  if (isBalanceSuspendedRate(rate)) return
 
   const accountId = String(connection.adminAccountId)
   if (dispatchLoadingAccountIds.value.has(accountId)) return
@@ -1001,6 +1162,7 @@ const toggleDispatch = async (rate: GroupRate) => {
     ...account,
     status: enabled ? 'active' : 'inactive',
     schedulable: enabled,
+    priority: account.priority,
     available: true,
   }
   const optimisticAccounts = new Map(dispatchAccountsById.value)
@@ -1011,8 +1173,14 @@ const toggleDispatch = async (rate: GroupRate) => {
     const state = await updateTargetDispatch(account.targetId, enabled)
     const updatedAccounts = new Map(dispatchAccountsById.value)
     const latestAccount = dispatchAccountsById.value.get(accountId) ?? previousAccount
-    updatedAccounts.set(accountId, { ...latestAccount, status: state.status, schedulable: state.schedulable })
+    updatedAccounts.set(accountId, {
+      ...latestAccount,
+      status: state.status,
+      schedulable: state.schedulable,
+      priority: state.priority ?? latestAccount.priority,
+    })
     dispatchAccountsById.value = updatedAccounts
+    resetPriorityDraft(accountId, updatedAccounts.get(accountId))
   } catch (error) {
     if (dispatchAccountsById.value.get(accountId) === optimisticAccount) {
       const rolledBackAccounts = new Map(dispatchAccountsById.value)
@@ -1025,6 +1193,72 @@ const toggleDispatch = async (rate: GroupRate) => {
     loadingIds.delete(accountId)
     dispatchLoadingAccountIds.value = loadingIds
   }
+}
+
+const commitPriority = async (rate: GroupRate) => {
+  const connection = realConnectionForRate(rate)
+  const account = dispatchAccountForRate(rate)
+  if (!connection || !account || !supportsDispatch(rate) || !hasDispatchState(rate)) return
+
+  const accountId = String(connection.adminAccountId)
+  if (priorityLoadingAccountIds.value.has(accountId)) return
+
+  const currentPriority = normalizedDispatchPriority(account)
+  const rawValue = (priorityDraftByAccountId.value.get(accountId) ?? String(currentPriority)).trim()
+  const parsedValue = Number(rawValue)
+  if (!rawValue || !Number.isFinite(parsedValue) || !Number.isInteger(parsedValue) || parsedValue < 1 || parsedValue > 50000) {
+    resetPriorityDraft(accountId, account)
+    return
+  }
+
+  const nextPriority = Math.trunc(parsedValue)
+  if (nextPriority === currentPriority) {
+    resetPriorityDraft(accountId, account)
+    return
+  }
+
+  priorityErrorKey.value = ''
+  const previousAccount = account
+  const optimisticAccount: BoundDispatchAccountState = {
+    ...account,
+    priority: nextPriority,
+    available: true,
+  }
+  const optimisticAccounts = new Map(dispatchAccountsById.value)
+  optimisticAccounts.set(accountId, optimisticAccount)
+  dispatchAccountsById.value = optimisticAccounts
+  setPriorityDraft(accountId, String(nextPriority))
+  priorityLoadingAccountIds.value = new Set(priorityLoadingAccountIds.value).add(accountId)
+  try {
+    const state = await updateTargetPriority(account.targetId, nextPriority)
+    const updatedAccounts = new Map(dispatchAccountsById.value)
+    const latestAccount = dispatchAccountsById.value.get(accountId) ?? previousAccount
+    const resolvedPriority = state.priority ?? nextPriority
+    updatedAccounts.set(accountId, {
+      ...latestAccount,
+      priority: resolvedPriority,
+    })
+    dispatchAccountsById.value = updatedAccounts
+    setPriorityDraft(accountId, String(resolvedPriority))
+  } catch (error) {
+    if (dispatchAccountsById.value.get(accountId) === optimisticAccount) {
+      const rolledBackAccounts = new Map(dispatchAccountsById.value)
+      rolledBackAccounts.set(accountId, previousAccount)
+      dispatchAccountsById.value = rolledBackAccounts
+    }
+    setPriorityDraft(accountId, String(currentPriority))
+    priorityErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.priority.updateFailed'
+  } finally {
+    const loadingIds = new Set(priorityLoadingAccountIds.value)
+    loadingIds.delete(accountId)
+    priorityLoadingAccountIds.value = loadingIds
+  }
+}
+
+const handlePriorityInput = (rate: GroupRate, event: Event) => {
+  const accountId = accountIdForRate(rate)
+  if (!accountId) return
+  setPriorityDraft(accountId, (event.target as HTMLInputElement).value)
 }
 
 const handlePlatformChange = async (event: Event) => {
@@ -1171,7 +1405,7 @@ const openConnectionEditor = async (rate: GroupRate) => {
   const connection = realConnectionForRate(rate)
   if (!connection) return
   connectionEditingRate.value = rate
-  editConnectionGroups.value = [...connection.ownGroupIds]
+  editConnectionGroups.value = intendedDownstreamGroupsForConnection(connection).map(group => group.id)
   editConnectionError.value = ''
   isUpdatingConnectionGroups.value = true
   try {
@@ -1198,7 +1432,7 @@ const toggleEditConnectionGroup = (groupId: string) => {
 
 const submitConnectionEditor = async () => {
   const connection = connectionBeingEdited.value
-  if (!connection || editConnectionGroups.value.length === 0) return
+  if (!connection) return
   isUpdatingConnectionGroups.value = true
   editConnectionError.value = ''
   try {
@@ -1308,7 +1542,39 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
       </div>
 
-      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto', statusFilter === 'mapped' ? 'sm:grid-cols-3' : 'sm:grid-cols-2']">
+      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto', statusFilter === 'mapped' ? 'sm:grid-cols-4' : 'sm:grid-cols-2']">
+        <button
+          v-if="statusFilter === 'mapped'"
+          type="button"
+          role="switch"
+          :aria-checked="healthSettingsSnapshot?.costGuardEnabled ?? false"
+          :disabled="isLoadingHealthSettingsSnapshot || isTogglingCostGuard || isSavingHealthSettings"
+          :class="[
+            'inline-flex h-11 items-center justify-between gap-3 rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+            (healthSettingsSnapshot?.costGuardEnabled ?? false)
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+              : 'border-border/60 bg-surface text-muted-foreground hover:border-primary/40 hover:text-foreground',
+            isLoadingHealthSettingsSnapshot || isTogglingCostGuard || isSavingHealthSettings ? 'cursor-wait opacity-70' : 'cursor-pointer',
+          ]"
+          @click="toggleCostGuardEnabled"
+        >
+          <span class="whitespace-nowrap">{{ t('admin.groupRates.health.settings.costGuard') }}</span>
+          <span
+            :class="[
+              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors',
+              healthSettingsSnapshot?.costGuardEnabled ? 'border-emerald-500/40 bg-emerald-500' : 'border-border/70 bg-muted',
+            ]"
+          >
+            <Loader2 v-if="isLoadingHealthSettingsSnapshot || isTogglingCostGuard" class="absolute left-1.5 h-3.5 w-3.5 animate-spin text-white" />
+            <span
+              v-else
+              :class="[
+                'h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+                healthSettingsSnapshot?.costGuardEnabled ? 'translate-x-5' : 'translate-x-1',
+              ]"
+            />
+          </span>
+        </button>
         <Button v-if="statusFilter === 'mapped'" variant="secondary" class="h-11 gap-2" @click="openHealthSettings">
           <Settings2 class="h-4 w-4" />
           {{ t('admin.groupRates.health.settings.action') }}
@@ -1335,6 +1601,11 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       <span>{{ t(dispatchErrorKey) }}</span>
     </div>
 
+    <div v-if="priorityErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
+      <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+      <span>{{ t(priorityErrorKey) }}</span>
+    </div>
+
     <div v-if="statusFilter === 'mapped' && healthSummaryErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-warning/20 bg-warning/10 p-4 text-sm text-warning">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
       <span>{{ t(healthSummaryErrorKey) }}</span>
@@ -1355,26 +1626,27 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
 
       <div v-else class="flex-1 overflow-auto">
-        <table :class="['relative w-full text-sm', statusFilter === 'mapped' ? 'min-w-[1160px]' : 'min-w-[1080px]']">
+        <table :class="['relative w-full text-sm', statusFilter === 'mapped' ? 'min-w-[1290px]' : 'min-w-[1080px]']">
           <thead class="sticky top-0 z-10 border-b border-border/50 bg-surface-elevated/90 backdrop-blur-sm">
             <tr>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">
+              <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
+              <th class="px-6 py-3 text-center font-medium text-muted-foreground">
                 {{ t(statusFilter === 'mapped' ? 'admin.groupRates.fields.upstreamGroup' : 'admin.groupRates.fields.groupName') }}
               </th>
-              <th v-if="statusFilter === 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">
+              <th v-if="statusFilter === 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">
                 {{ t('admin.groupRates.fields.downstreamGroup') }}
               </th>
-              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
-              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
-              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.delta') }}</th>
+              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
+              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
+              <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
+              <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.delta') }}</th>
               <th v-if="statusFilter === 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.health') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">
+              <th class="px-6 py-3 text-center font-medium text-muted-foreground">
                 {{ t(statusFilter === 'mapped' ? 'admin.groupRates.fields.latestProbe' : 'admin.groupRates.fields.updatedAt') }}
               </th>
               <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.dispatch') }}</th>
-              <th class="px-6 py-3 text-right font-medium text-muted-foreground">{{ t('admin.groupRates.fields.actions') }}</th>
+              <th v-if="statusFilter === 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.priority') }}</th>
+              <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.actions') }}</th>
             </tr>
           </thead>
           <tbody class="divide-y divide-border/50">
@@ -1466,7 +1738,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                       wide
                     >
                       <span
-                        :class="['block h-5 w-2.5 rounded-[3px] transition-colors', healthBarClasses(event, healthSummaryForRate(rate)?.stale ?? false)]"
+                        :class="['block h-5 w-2.5 rounded-[3px] transition-colors', healthBarClasses(event, healthSummaryForRate(rate)?.stale ?? false, isBalanceSuspendedRate(rate))]"
                       />
                     </Tooltip>
                   </div>
@@ -1486,12 +1758,12 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   :aria-checked="isDispatchEnabledForRate(rate)"
                   :aria-label="dispatchStatusLabel(rate)"
                   :title="dispatchStatusLabel(rate)"
-                  :disabled="isDispatchUpdating(rate) || isLoadingDispatchAccounts || !hasDispatchState(rate)"
+                  :disabled="isDispatchUpdating(rate) || isLoadingDispatchAccounts || !hasDispatchState(rate) || isBalanceSuspendedRate(rate)"
                   :class="[
                     'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
                     isDispatchUpdating(rate) || isLoadingDispatchAccounts
                       ? 'cursor-wait opacity-70'
-                      : isDispatchUnavailable(rate)
+                      : isDispatchUnavailable(rate) || isBalanceSuspendedRate(rate)
                         ? 'cursor-not-allowed opacity-50'
                         : 'cursor-pointer',
                     isDispatchEnabledForRate(rate)
@@ -1509,6 +1781,27 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                     <Loader2 v-if="isDispatchUpdating(rate) || isLoadingDispatchAccounts" class="h-3 w-3 animate-spin" />
                   </span>
                 </button>
+                <span v-else class="text-muted-foreground">{{ t('admin.groupRates.common.placeholder') }}</span>
+              </td>
+              <td v-if="statusFilter === 'mapped'" class="px-4 py-2.5 text-center">
+                <div v-if="supportsDispatch(rate) && hasDispatchState(rate)" class="relative mx-auto w-[96px]">
+                  <input
+                    :value="priorityValueForRate(rate)"
+                    type="number"
+                    min="1"
+                    max="50000"
+                    step="1"
+                    :disabled="isPriorityUpdating(rate) || isLoadingDispatchAccounts"
+                    :aria-label="priorityStatusLabel(rate)"
+                    :title="priorityStatusLabel(rate)"
+                    class="h-8 w-full rounded-md border border-border/70 bg-surface px-3 pr-8 text-center text-sm font-semibold tabular-nums text-foreground outline-none transition-[color,background-color,border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30 disabled:cursor-not-allowed disabled:opacity-60"
+                    @input="handlePriorityInput(rate, $event)"
+                    @change="commitPriority(rate)"
+                    @blur="commitPriority(rate)"
+                    @keydown.enter.prevent="commitPriority(rate)"
+                  />
+                  <Loader2 v-if="isPriorityUpdating(rate) || isLoadingDispatchAccounts" class="pointer-events-none absolute right-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-muted-foreground" />
+                </div>
                 <span v-else class="text-muted-foreground">{{ t('admin.groupRates.common.placeholder') }}</span>
               </td>
               <td class="px-4 py-2.5 text-center">
@@ -1772,13 +2065,13 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           <table class="w-full min-w-[680px] text-sm">
             <thead class="sticky top-0 border-b border-border/50 bg-surface-elevated">
               <tr>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.groupName') }}</th>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.history.multiplier') }}</th>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.history.delta') }}</th>
-                <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.history.createdAt') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.siteName') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.groupName') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.type') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.platform') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.history.multiplier') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.history.delta') }}</th>
+                <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.history.createdAt') }}</th>
               </tr>
             </thead>
             <tbody class="divide-y divide-border/50">
@@ -2165,7 +2458,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <Button type="button" variant="secondary" :disabled="isUpdatingConnectionGroups" @click="closeConnectionEditor">
               {{ t('admin.groupRates.actions.cancel') }}
             </Button>
-            <Button type="submit" class="gap-2" :disabled="isUpdatingConnectionGroups || editConnectionGroups.length === 0">
+            <Button type="submit" class="gap-2" :disabled="isUpdatingConnectionGroups">
               <Loader2 v-if="isUpdatingConnectionGroups" class="h-4 w-4 animate-spin" />
               {{ t('admin.groupRates.actions.confirm') }}
             </Button>

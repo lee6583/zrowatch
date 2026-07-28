@@ -67,6 +67,14 @@ const normalizeMappingOptions = (response: MySiteMappingOptionsResponse): MySite
   staleTargets: Array.isArray(response.staleTargets) ? response.staleTargets : [],
 })
 
+const normalizeRealConnection = (connection: RealConnection): RealConnection => ({
+  ...connection,
+  ownGroupIds: Array.isArray(connection.ownGroupIds) ? connection.ownGroupIds : [],
+  ownGroupNames: Array.isArray(connection.ownGroupNames) ? connection.ownGroupNames : [],
+  costGuardPausedOwnGroupIds: Array.isArray(connection.costGuardPausedOwnGroupIds) ? connection.costGuardPausedOwnGroupIds : [],
+  costGuardPausedOwnGroupNames: Array.isArray(connection.costGuardPausedOwnGroupNames) ? connection.costGuardPausedOwnGroupNames : [],
+})
+
 const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<T> => {
   let response: Response
   try {
@@ -123,8 +131,10 @@ export const realConnect = async (req: RealConnectRequest): Promise<RealConnectR
   })
 )
 
-export const listRealConnections = async (): Promise<RealConnection[]> =>
-  requestJson<RealConnection[]>('/my-sites/real-connections')
+export const listRealConnections = async (): Promise<RealConnection[]> => {
+  const connections = await requestJson<RealConnection[]>('/my-sites/real-connections')
+  return Array.isArray(connections) ? connections.map(normalizeRealConnection) : []
+}
 
 export const getDownstreamConsumption = async (): Promise<DownstreamConsumptionResponse> => {
   const response = await requestJson<DownstreamConsumptionResponse>('/my-sites/downstream-consumption')
@@ -168,10 +178,10 @@ export const realDisconnect = async (req: RealDisconnectRequest): Promise<void> 
 }
 
 export const updateRealConnectionGroups = async (req: UpdateRealConnectionGroupsRequest): Promise<RealConnection> => (
-  requestJson<RealConnection>(`/my-sites/real-connections/${encodeURIComponent(req.connectionId)}/groups`, {
+  normalizeRealConnection(await requestJson<RealConnection>(`/my-sites/real-connections/${encodeURIComponent(req.connectionId)}/groups`, {
     method: 'PATCH',
     body: JSON.stringify({ ownGroupIds: req.ownGroupIds }),
-  })
+  }))
 )
 
 export const runAutoPricing = async (req: RunAutoPricingRequest): Promise<RunAutoPricingResponse> => {

@@ -1290,7 +1290,7 @@ export default {
       },
       errors: {
         request: '操作失败，请稍后重试。',
-        balanceSuspended: '该账号所属站点余额不足，当前不能开启调度。',
+        balanceSuspended: '耗尽',
         unknown: '暂时无法读取分组健康数据，请稍后重试。',
         network: '网络异常，请检查连接后重试。',
         notFound: '探活目标不存在或无权访问。',
@@ -1513,6 +1513,7 @@ export default {
         latestProbe: '最近探活',
         updatedAt: '更新时间',
         dispatch: '调度',
+        priority: '优先级',
         actions: '操作'
       },
       dispatch: {
@@ -1525,6 +1526,13 @@ export default {
         loadFailed: '调度状态加载失败，请刷新后重试。',
         updateFailed: '调度状态更新失败，请稍后重试。'
       },
+      priority: {
+        edit: '编辑优先级',
+        loading: '正在读取优先级…',
+        updating: '正在更新优先级…',
+        unavailable: '暂无可用值',
+        updateFailed: '优先级更新失败，请稍后重试。'
+      },
       health: {
         noResult: '暂无探活结果',
         status: {
@@ -1533,7 +1541,8 @@ export default {
           unhealthy: '异常',
           unavailable: '不可用',
           unconfigured: '未配置',
-          stale: '已过期'
+          stale: '已过期',
+          exhausted: '耗尽'
         },
         trigger: {
           manual: '手动探活',
@@ -1564,7 +1573,8 @@ export default {
           base_url_unavailable: '缺少 Base URL',
           model_unavailable: '模型不可用',
           export_unavailable: '账号导出接口不可用',
-          credentials_redacted: '账号凭据已脱敏'
+          credentials_redacted: '账号凭据已脱敏',
+          balance_suspended: '耗尽'
         },
         probe: {
           action: '立即探活',
@@ -1581,6 +1591,7 @@ export default {
           action: '探活设置',
           title: '探活设置',
           description: '使用上游站点 URL 和该分组的 API Key 发起真实最小请求；连续失败后关闭其绑定的下游 Sub2API 账户。',
+          costGuard: '亏本保护',
           loading: '正在读取探活设置...',
           enabled: '启用自动探活',
           enabledHint: '启用后，当前和未来新增的已对接上游分组都会使用各自的 URL 与 API Key 自动探活。',

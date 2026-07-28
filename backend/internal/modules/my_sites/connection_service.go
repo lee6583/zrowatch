@@ -538,7 +538,7 @@ func (s *Service) realBindExisting(ctx context.Context, userID string, req RealB
 
 func (s *Service) UpdateRealConnectionGroups(ctx context.Context, userID, connectionID string, req UpdateRealConnectionGroupsRequest) (RealConnection, error) {
 	connectionID = strings.TrimSpace(connectionID)
-	if connectionID == "" || len(req.OwnGroupIDs) == 0 || s.connRepository == nil {
+	if connectionID == "" || s.connRepository == nil {
 		return RealConnection{}, requestError(ErrorRequest)
 	}
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
@@ -552,18 +552,26 @@ func (s *Service) UpdateRealConnectionGroups(ctx context.Context, userID, connec
 	if conn == nil || strings.TrimSpace(conn.AdminAccountID) == "" {
 		return RealConnection{}, requestError(ErrorRequest)
 	}
+	pauses, err := s.costGuardPausesForConnection(ctx, userID, adminAccountID, conn.ID)
+	if err != nil {
+		return RealConnection{}, err
+	}
 	state, err := s.authenticatedState(ctx, userID, adminAccountID)
 	if err != nil {
 		return RealConnection{}, err
 	}
-	groupIDs, groupNames, err := s.resolveAdminGroups(ctx, state, req.OwnGroupIDs)
-	if err != nil {
-		return RealConnection{}, err
+	groupIDs := []string{}
+	groupNames := []string{}
+	if len(req.OwnGroupIDs) > 0 {
+		groupIDs, groupNames, err = s.resolveAdminGroups(ctx, state, req.OwnGroupIDs)
+		if err != nil {
+			return RealConnection{}, err
+		}
 	}
 	if string(state.Session.Platform) != conn.AdminPlatform && conn.AdminPlatform != "" {
 		return RealConnection{}, requestError(ErrorRequest)
 	}
-	if sameStringSet(groupIDs, conn.OwnGroupIDs) {
+	if sameStringSet(groupIDs, conn.OwnGroupIDs) && len(pauses) == 0 {
 		conn.OwnGroupIDs = groupIDs
 		conn.OwnGroupNames = groupNames
 		return publicRealConnection(*conn), nil
@@ -582,13 +590,10 @@ func (s *Service) UpdateRealConnectionGroups(ctx context.Context, userID, connec
 		return RealConnection{}, requestError(ErrorRequest)
 	}
 
-	oldNamesByID := make(map[string]string, len(conn.OwnGroupIDs))
-	for index, id := range conn.OwnGroupIDs {
-		name := id
-		if index < len(conn.OwnGroupNames) && strings.TrimSpace(conn.OwnGroupNames[index]) != "" {
-			name = conn.OwnGroupNames[index]
-		}
-		oldNamesByID[id] = name
+	intendedIDs, intendedNames := connectionGroupsWithCostGuardPauses(*conn, pauses)
+	oldNamesByID := make(map[string]string, len(intendedIDs))
+	for index, id := range intendedIDs {
+		oldNamesByID[id] = groupNameAt(intendedNames, index, id)
 	}
 	newNamesByID := make(map[string]string, len(groupIDs))
 	for index, id := range groupIDs {
@@ -614,9 +619,63 @@ func (s *Service) UpdateRealConnectionGroups(ctx context.Context, userID, connec
 	if err := repository.UpdateRealConnectionGroups(ctx, *conn, groupIDs, groupNames, addedNames, removedNames); err != nil {
 		return RealConnection{}, err
 	}
+	if pauseRepo, ok := s.connRepository.(CostGuardPauseRepository); ok && len(pauses) > 0 {
+		if err := pauseRepo.DeleteCostGuardPausesForConnection(ctx, userID, adminAccountID, conn.ID); err != nil {
+			log.Printf("[cost-guard] manual group update pause cleanup failed connection_id=%s err=%v", conn.ID, err)
+		}
+	}
 	conn.OwnGroupIDs = groupIDs
 	conn.OwnGroupNames = groupNames
+	conn.CostGuardPausedOwnGroupIDs = []string{}
+	conn.CostGuardPausedOwnGroupNames = []string{}
 	return publicRealConnection(*conn), nil
+}
+
+func (s *Service) costGuardPausesForConnection(ctx context.Context, userID, adminAccountID, connectionID string) ([]CostGuardPause, error) {
+	pauseRepo, ok := s.connRepository.(CostGuardPauseRepository)
+	if !ok {
+		return nil, nil
+	}
+	pauses, err := pauseRepo.ListCostGuardPauses(ctx, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]CostGuardPause, 0)
+	for _, pause := range pauses {
+		if pause.ConnectionID == connectionID {
+			result = append(result, pause)
+		}
+	}
+	return result, nil
+}
+
+func connectionGroupsWithCostGuardPauses(conn RealConnection, pauses []CostGuardPause) ([]string, []string) {
+	ids := append([]string(nil), conn.OwnGroupIDs...)
+	names := append([]string(nil), conn.OwnGroupNames...)
+	seen := make(map[string]struct{}, len(ids)+len(pauses))
+	for _, id := range ids {
+		seen[id] = struct{}{}
+	}
+	for _, pause := range pauses {
+		id := strings.TrimSpace(pause.OwnGroupID)
+		if id == "" {
+			continue
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+		names = append(names, firstNonEmpty(pause.OwnGroupName, id))
+	}
+	return ids, names
+}
+
+func groupNameAt(names []string, index int, fallback string) string {
+	if index < len(names) && strings.TrimSpace(names[index]) != "" {
+		return names[index]
+	}
+	return fallback
 }
 
 func sameStringSet(first, second []string) bool {
@@ -651,12 +710,17 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 		return requestError(ErrorRequest)
 	}
 
-	selectedIDs := normalizeDisconnectGroupIDs(req.OwnGroupIDs, conn.OwnGroupIDs)
+	pauses, err := s.costGuardPausesForConnection(ctx, userID, adminAccountID, conn.ID)
+	if err != nil {
+		return err
+	}
+	intendedIDs, intendedNames := connectionGroupsWithCostGuardPauses(*conn, pauses)
+	selectedIDs := normalizeDisconnectGroupIDs(req.OwnGroupIDs, intendedIDs)
 	if len(req.OwnGroupIDs) > 0 && len(selectedIDs) == 0 {
 		return requestError(ErrorRequest)
 	}
 	if len(selectedIDs) == 0 {
-		selectedIDs = append([]string(nil), conn.OwnGroupIDs...)
+		selectedIDs = append([]string(nil), intendedIDs...)
 	}
 	selectedSet := make(map[string]struct{}, len(selectedIDs))
 	for _, id := range selectedIDs {
@@ -666,10 +730,7 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 	remainingNames := make([]string, 0, len(conn.OwnGroupNames))
 	removedNames := make([]string, 0, len(selectedIDs))
 	for index, id := range conn.OwnGroupIDs {
-		name := id
-		if index < len(conn.OwnGroupNames) && strings.TrimSpace(conn.OwnGroupNames[index]) != "" {
-			name = conn.OwnGroupNames[index]
-		}
+		name := groupNameAt(conn.OwnGroupNames, index, id)
 		if _, selected := selectedSet[id]; selected {
 			removedNames = append(removedNames, name)
 			continue
@@ -677,7 +738,18 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 		remainingIDs = append(remainingIDs, id)
 		remainingNames = append(remainingNames, name)
 	}
-	partial := len(remainingIDs) > 0 && len(removedNames) > 0
+	remainingPaused := 0
+	for index, id := range intendedIDs {
+		if containsString(conn.OwnGroupIDs, id) {
+			continue
+		}
+		if _, selected := selectedSet[id]; selected {
+			removedNames = append(removedNames, groupNameAt(intendedNames, index, id))
+			continue
+		}
+		remainingPaused++
+	}
+	partial := len(selectedIDs) > 0 && len(remainingIDs)+remainingPaused > 0
 	if partial && req.Mode == "full" && !strings.EqualFold(conn.AdminPlatform, string(upstream.PlatformSub2API)) {
 		return requestError(ErrorPartialDisconnectUnsupported)
 	}
@@ -726,15 +798,49 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 		if !ok {
 			return requestError(ErrorRequest)
 		}
-		return repository.PartialDisconnectRealConnection(ctx, *conn, remainingIDs, remainingNames, removedNames, removePricing)
+		if err := repository.PartialDisconnectRealConnection(ctx, *conn, remainingIDs, remainingNames, removedNames, removePricing); err != nil {
+			return err
+		}
+		if pauseRepo, ok := s.connRepository.(CostGuardPauseRepository); ok {
+			for _, id := range selectedIDs {
+				if err := pauseRepo.DeleteCostGuardPause(ctx, userID, adminAccountID, conn.ID, id); err != nil {
+					log.Printf("[cost-guard] partial disconnect pause cleanup failed connection_id=%s own_group=%s err=%v", conn.ID, id, err)
+				}
+			}
+		}
+		return nil
 	}
 	if repository, ok := s.connRepository.(ScopedRealDisconnectRepository); ok {
-		return repository.DeleteRealConnectionWithPricingMapping(ctx, *conn, removePricing)
+		if err := repository.DeleteRealConnectionWithPricingMapping(ctx, *conn, removePricing); err != nil {
+			return err
+		}
+		if pauseRepo, ok := s.connRepository.(CostGuardPauseRepository); ok {
+			if err := pauseRepo.DeleteCostGuardPausesForConnection(ctx, userID, adminAccountID, conn.ID); err != nil {
+				log.Printf("[cost-guard] full disconnect pause cleanup failed connection_id=%s err=%v", conn.ID, err)
+			}
+		}
+		return nil
 	}
 	if removePricing {
-		return s.removeUpstreamMappingAndDeleteConnection(ctx, userID, adminAccountID, req.ConnectionID, conn.UpstreamSiteID, conn.UpstreamGroupName)
+		if err := s.removeUpstreamMappingAndDeleteConnection(ctx, userID, adminAccountID, req.ConnectionID, conn.UpstreamSiteID, conn.UpstreamGroupName); err != nil {
+			return err
+		}
+		if pauseRepo, ok := s.connRepository.(CostGuardPauseRepository); ok {
+			if err := pauseRepo.DeleteCostGuardPausesForConnection(ctx, userID, adminAccountID, conn.ID); err != nil {
+				log.Printf("[cost-guard] full disconnect pause cleanup failed connection_id=%s err=%v", conn.ID, err)
+			}
+		}
+		return nil
 	}
-	return s.connRepository.DeleteRealConnection(ctx, req.ConnectionID, userID, adminAccountID)
+	if err := s.connRepository.DeleteRealConnection(ctx, req.ConnectionID, userID, adminAccountID); err != nil {
+		return err
+	}
+	if pauseRepo, ok := s.connRepository.(CostGuardPauseRepository); ok {
+		if err := pauseRepo.DeleteCostGuardPausesForConnection(ctx, userID, adminAccountID, conn.ID); err != nil {
+			log.Printf("[cost-guard] unlink pause cleanup failed connection_id=%s err=%v", conn.ID, err)
+		}
+	}
+	return nil
 }
 
 func normalizeDisconnectGroupIDs(selected, available []string) []string {
@@ -767,6 +873,18 @@ func normalizeDisconnectGroupIDs(selected, available []string) []string {
 func publicRealConnection(conn RealConnection) RealConnection {
 	conn.UpstreamKey = ""
 	conn.OperationID = ""
+	if conn.OwnGroupIDs == nil {
+		conn.OwnGroupIDs = []string{}
+	}
+	if conn.OwnGroupNames == nil {
+		conn.OwnGroupNames = []string{}
+	}
+	if conn.CostGuardPausedOwnGroupIDs == nil {
+		conn.CostGuardPausedOwnGroupIDs = []string{}
+	}
+	if conn.CostGuardPausedOwnGroupNames == nil {
+		conn.CostGuardPausedOwnGroupNames = []string{}
+	}
 	conn.CanDeleteRemote = conn.ProvisioningMode == ProvisioningModeManaged ||
 		(conn.ProvisioningMode == ProvisioningModeLegacy && conn.AdminAccountID != "")
 	return conn

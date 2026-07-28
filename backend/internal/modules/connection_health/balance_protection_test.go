@@ -177,3 +177,41 @@ func TestUpdateTargetDispatchRejectsEnableDuringBalancePause(t *testing.T) {
 		t.Fatalf("unexpected disable dispatch call: %#v", actions.calls)
 	}
 }
+
+func TestBoundDispatchAccountsMarksBalancePausedAccountUnavailable(t *testing.T) {
+	schedulable := true
+	priority := 7
+	dispatchReader := &fakeFastDispatchActioner{
+		statesByID: map[string]upstream.Sub2APIAdminAccountState{
+			"account-1": {ID: "account-1", Name: "account", Status: "active", Schedulable: &schedulable, Priority: &priority},
+		},
+	}
+	service := &Service{
+		mySites: fakeMySitesReader{
+			session: upstream.Session{Platform: upstream.PlatformSub2API, AccessToken: "token"},
+			connections: []my_sites.RealConnection{{
+				ID: "conn-1", UserID: "user-1", WorkspaceAdminAccountID: "workspace-1",
+				UpstreamSiteID: "site-1", UpstreamGroupID: "group-1", UpstreamGroupName: "vip",
+				AdminAccountID: "account-1", AdminAccountName: "account",
+				Status: my_sites.ConnectionStatusActive, AdminPlatform: string(upstream.PlatformSub2API),
+			}},
+		},
+		accounts:       fakeAdminAccountResolver{id: "workspace-1"},
+		dispatchStates: dispatchReader,
+		balancePauses:  fakeBalancePauseLookup{paused: true},
+	}
+
+	accounts, err := service.BoundDispatchAccounts(context.Background(), "user-1")
+	if err != nil {
+		t.Fatalf("BoundDispatchAccounts returned error: %v", err)
+	}
+	if len(accounts) != 1 {
+		t.Fatalf("expected one account, got %#v", accounts)
+	}
+	if accounts[0].Available || accounts[0].UnavailableReason != "balance_suspended" {
+		t.Fatalf("expected balance suspended unavailable account, got %#v", accounts[0])
+	}
+	if accounts[0].Schedulable == nil || !*accounts[0].Schedulable || accounts[0].Status != "active" || accounts[0].Priority == nil || *accounts[0].Priority != priority {
+		t.Fatalf("expected remote state preserved for display, got %#v", accounts[0])
+	}
+}

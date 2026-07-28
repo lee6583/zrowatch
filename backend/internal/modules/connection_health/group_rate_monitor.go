@@ -33,6 +33,7 @@ type GroupRateMonitorSettings struct {
 	UserID               string    `json:"-"`
 	AdminAccountID       string    `json:"-"`
 	Enabled              bool      `json:"enabled"`
+	CostGuardEnabled     bool      `json:"costGuardEnabled"`
 	ProbeIntervalSeconds int       `json:"probeIntervalSeconds"`
 	FailureThreshold     int       `json:"failureThreshold"`
 	DefaultModel         string    `json:"defaultModel"`
@@ -87,6 +88,7 @@ type GroupRateMonitorRestoreSummary struct {
 
 type GroupRateMonitorSettingsView struct {
 	Enabled              bool                           `json:"enabled"`
+	CostGuardEnabled     bool                           `json:"costGuardEnabled"`
 	ProbeIntervalSeconds int                            `json:"probeIntervalSeconds"`
 	FailureThreshold     int                            `json:"failureThreshold"`
 	DefaultModel         string                         `json:"defaultModel"`
@@ -97,6 +99,7 @@ type GroupRateMonitorSettingsView struct {
 
 type GroupRateMonitorSettingsInput struct {
 	Enabled              bool                          `json:"enabled"`
+	CostGuardEnabled     bool                          `json:"costGuardEnabled"`
 	ProbeIntervalSeconds int                           `json:"probeIntervalSeconds"`
 	FailureThreshold     int                           `json:"failureThreshold"`
 	DefaultModel         string                        `json:"defaultModel"`
@@ -123,6 +126,10 @@ type GroupRateMonitorTargetState struct {
 	UnavailableReason   string
 	LastProbeAt         *time.Time
 	UpdatedAt           time.Time
+}
+
+type GroupRateMonitorCostGuardInput struct {
+	Enabled bool `json:"enabled"`
 }
 
 type GroupRateProbeTargetResult struct {
@@ -448,7 +455,7 @@ func (s *Service) buildGroupRateMonitorSettingsView(_ context.Context, settings 
 		})
 	}
 	return GroupRateMonitorSettingsView{
-		Enabled: settings.Enabled, ProbeIntervalSeconds: settings.ProbeIntervalSeconds,
+		Enabled: settings.Enabled, CostGuardEnabled: settings.CostGuardEnabled, ProbeIntervalSeconds: settings.ProbeIntervalSeconds,
 		FailureThreshold: settings.FailureThreshold, DefaultModel: settings.DefaultModel,
 		TypeDefaults: typeViews, Groups: groupViews,
 	}
@@ -532,7 +539,7 @@ func (s *Service) SaveGroupRateMonitorSettings(ctx context.Context, userID strin
 			UpstreamGroupName: group.GroupName, Enabled: item.Enabled, Model: strings.TrimSpace(item.Model),
 			ProbeIntervalSeconds: item.ProbeIntervalSeconds, FailureThreshold: item.FailureThreshold})
 	}
-	settings := GroupRateMonitorSettings{UserID: userID, AdminAccountID: adminAccountID, Enabled: input.Enabled,
+	settings := GroupRateMonitorSettings{UserID: userID, AdminAccountID: adminAccountID, Enabled: input.Enabled, CostGuardEnabled: input.CostGuardEnabled,
 		ProbeIntervalSeconds: input.ProbeIntervalSeconds, FailureThreshold: input.FailureThreshold,
 		DefaultModel: strings.TrimSpace(input.DefaultModel)}
 	if err := repo.SaveGroupRateMonitorSettings(ctx, settings, typeDefaults, overrides); err != nil {
@@ -545,6 +552,30 @@ func (s *Service) SaveGroupRateMonitorSettings(ctx context.Context, userID strin
 	}
 	view.Restore = restore
 	return view, nil
+}
+
+func (s *Service) SetGroupRateMonitorCostGuard(ctx context.Context, userID string, enabled bool) (GroupRateMonitorCostGuardInput, error) {
+	adminAccountID, repo, err := s.groupRateMonitorWorkspace(ctx, userID)
+	if err != nil {
+		return GroupRateMonitorCostGuardInput{}, err
+	}
+	settings, err := repo.GetGroupRateMonitorSettings(ctx, userID, adminAccountID)
+	if err != nil {
+		return GroupRateMonitorCostGuardInput{}, err
+	}
+	typeDefaults, err := repo.ListGroupRateMonitorTypeDefaults(ctx, userID, adminAccountID)
+	if err != nil {
+		return GroupRateMonitorCostGuardInput{}, err
+	}
+	overrides, err := repo.ListGroupRateMonitorOverrides(ctx, userID, adminAccountID)
+	if err != nil {
+		return GroupRateMonitorCostGuardInput{}, err
+	}
+	settings.CostGuardEnabled = enabled
+	if err := repo.SaveGroupRateMonitorSettings(ctx, settings, typeDefaults, overrides); err != nil {
+		return GroupRateMonitorCostGuardInput{}, err
+	}
+	return GroupRateMonitorCostGuardInput{Enabled: enabled}, nil
 }
 
 func (s *Service) GroupRateMonitorSummaries(ctx context.Context, userID string) ([]GroupRateMonitorSummary, error) {
