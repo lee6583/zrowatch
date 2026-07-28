@@ -4,12 +4,14 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"transithub/backend/internal/modules/upstream"
@@ -608,6 +610,270 @@ func (s *Service) ListRealConnections(ctx context.Context, userID string) ([]Rea
 		connections[i] = publicRealConnection(connections[i])
 	}
 	return connections, nil
+}
+
+const downstreamConsumptionLocation = "Asia/Shanghai"
+
+const (
+	downstreamConsumptionAccountConflictError    = "admin.upstream.downstreamConsumption.accountConflict"
+	downstreamConsumptionInvalidDateError        = "admin.upstream.downstreamConsumption.invalidConnectionDate"
+	downstreamConsumptionMultipleErrors          = "admin.upstream.downstreamConsumption.multipleErrors"
+	downstreamConsumptionSessionUnavailableError = "admin.upstream.downstreamConsumption.sessionUnavailable"
+)
+
+var downstreamConsumptionTimeZone = loadLocationOrUTC(downstreamConsumptionLocation)
+
+type downstreamConsumptionAccount struct {
+	siteID    string
+	accountID string
+	startDate string
+	errorKey  string
+}
+
+type downstreamConsumptionSite struct {
+	accounts   map[string]downstreamConsumptionAccount
+	conflicts  map[string]struct{}
+	failed     int
+	successful int
+	amount     float64
+	errorKey   string
+}
+
+// DownstreamConsumption 汇总当前 workspace 中真实对接的 Sub2API admin 账号实际扣费。
+// 账号按站点去重，统计起点取该账号最早的真实对接记录创建日期。
+func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (DownstreamConsumptionResponse, error) {
+	response := DownstreamConsumptionResponse{
+		Currency: "CNY",
+		Period:   "since_connection",
+		Items:    []DownstreamConsumptionItem{},
+	}
+	if s.connRepository == nil {
+		return response, nil
+	}
+
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return response, err
+	}
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		return response, err
+	}
+
+	sites := make(map[string]*downstreamConsumptionSite)
+	accountSites := make(map[string]map[string]struct{})
+	for _, connection := range connections {
+		siteID := strings.TrimSpace(connection.UpstreamSiteID)
+		if siteID == "" {
+			continue
+		}
+		site := sites[siteID]
+		if site == nil {
+			site = &downstreamConsumptionSite{
+				accounts:  make(map[string]downstreamConsumptionAccount),
+				conflicts: make(map[string]struct{}),
+			}
+			sites[siteID] = site
+		}
+
+		accountID := strings.TrimSpace(connection.AdminAccountID)
+		if accountID == "" {
+			continue
+		}
+		startDate, parseErr := downstreamConsumptionStartDate(connection.CreatedAt)
+		if parseErr != nil {
+			if _, exists := site.accounts[accountID]; !exists {
+				site.accounts[accountID] = downstreamConsumptionAccount{
+					siteID: siteID, accountID: accountID, errorKey: downstreamConsumptionInvalidDateError,
+				}
+			}
+		} else if existing, exists := site.accounts[accountID]; !exists || startDate < existing.startDate || existing.startDate == "" {
+			site.accounts[accountID] = downstreamConsumptionAccount{siteID: siteID, accountID: accountID, startDate: startDate}
+		}
+
+		if accountSites[accountID] == nil {
+			accountSites[accountID] = make(map[string]struct{})
+		}
+		accountSites[accountID][siteID] = struct{}{}
+	}
+
+	for accountID, siteIDs := range accountSites {
+		if len(siteIDs) < 2 {
+			continue
+		}
+		for siteID := range siteIDs {
+			if site := sites[siteID]; site != nil {
+				site.conflicts[accountID] = struct{}{}
+				setDownstreamConsumptionError(site, downstreamConsumptionAccountConflictError)
+			}
+		}
+	}
+
+	orderedSiteIDs := make([]string, 0, len(sites))
+	for siteID := range sites {
+		orderedSiteIDs = append(orderedSiteIDs, siteID)
+	}
+	sort.Strings(orderedSiteIDs)
+
+	items := make(map[string]DownstreamConsumptionItem, len(orderedSiteIDs))
+	for _, siteID := range orderedSiteIDs {
+		site := sites[siteID]
+		status := DownstreamConsumptionUnavailable
+		if len(site.accounts) == 0 {
+			status = DownstreamConsumptionEmpty
+		}
+		items[siteID] = downstreamConsumptionItemForSite(siteID, site, status)
+	}
+
+	session, sessionErr := s.RequireSession(ctx, userID, adminAccountID)
+	if sessionErr != nil {
+		for _, siteID := range orderedSiteIDs {
+			if len(sites[siteID].accounts) > 0 {
+				setDownstreamConsumptionError(sites[siteID], downstreamConsumptionSessionUnavailableError)
+				items[siteID] = downstreamConsumptionItemForSite(siteID, sites[siteID], DownstreamConsumptionUnavailable)
+			}
+		}
+		response.Items = downstreamConsumptionItemsInOrder(items, orderedSiteIDs)
+		return response, nil
+	}
+	if session.Platform != upstream.PlatformSub2API {
+		for _, siteID := range orderedSiteIDs {
+			status := DownstreamConsumptionUnsupported
+			if len(sites[siteID].accounts) == 0 {
+				status = DownstreamConsumptionEmpty
+			}
+			items[siteID] = downstreamConsumptionItemForSite(siteID, sites[siteID], status)
+		}
+		response.Items = downstreamConsumptionItemsInOrder(items, orderedSiteIDs)
+		return response, nil
+	}
+
+	type result struct {
+		account downstreamConsumptionAccount
+		amount  float64
+		err     error
+	}
+	results := make(chan result)
+	semaphore := make(chan struct{}, 5)
+	var wait sync.WaitGroup
+	for _, siteID := range orderedSiteIDs {
+		for accountID, account := range sites[siteID].accounts {
+			if _, conflicted := sites[siteID].conflicts[accountID]; conflicted {
+				continue
+			}
+			if account.startDate == "" {
+				sites[siteID].failed++
+				setDownstreamConsumptionError(sites[siteID], account.errorKey)
+				continue
+			}
+			account := account
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				select {
+				case semaphore <- struct{}{}:
+				case <-ctx.Done():
+					results <- result{account: account, err: ctx.Err()}
+					return
+				}
+				amount, queryErr := s.platformService.FetchSub2APIAdminAccountUsageStats(session, account.accountID, account.startDate, time.Now().In(downstreamConsumptionTimeZone).Format("2006-01-02"))
+				<-semaphore
+				results <- result{account: account, amount: amount, err: queryErr}
+			}()
+		}
+	}
+	go func() {
+		wait.Wait()
+		close(results)
+	}()
+
+	for item := range results {
+		site := sites[item.account.siteID]
+		if item.err != nil {
+			site.failed++
+			setDownstreamConsumptionError(site, downstreamConsumptionSafeErrorKey(item.err))
+			continue
+		}
+		site.successful++
+		site.amount += item.amount
+	}
+
+	for _, siteID := range orderedSiteIDs {
+		site := sites[siteID]
+		status := DownstreamConsumptionUnavailable
+		accountCount := len(site.accounts)
+		conflictCount := len(site.conflicts)
+		if accountCount == 0 {
+			status = DownstreamConsumptionEmpty
+		} else if site.successful == accountCount && site.failed == 0 && conflictCount == 0 {
+			status = DownstreamConsumptionAvailable
+		} else if site.successful > 0 || conflictCount > 0 {
+			status = DownstreamConsumptionPartial
+		}
+		item := downstreamConsumptionItemForSite(siteID, site, status)
+		if site.successful > 0 || status == DownstreamConsumptionAvailable {
+			amount := site.amount
+			item.Amount = &amount
+		}
+		items[siteID] = item
+	}
+	response.Items = downstreamConsumptionItemsInOrder(items, orderedSiteIDs)
+	return response, nil
+}
+
+func downstreamConsumptionItemForSite(siteID string, site *downstreamConsumptionSite, status DownstreamConsumptionStatus) DownstreamConsumptionItem {
+	return DownstreamConsumptionItem{
+		SiteID:                 siteID,
+		AccountCount:           len(site.accounts),
+		SuccessfulAccountCount: site.successful,
+		FailedAccountCount:     site.failed,
+		ConflictAccountCount:   len(site.conflicts),
+		Status:                 status,
+		ErrorKey:               site.errorKey,
+	}
+}
+
+func setDownstreamConsumptionError(site *downstreamConsumptionSite, errorKey string) {
+	if site == nil || strings.TrimSpace(errorKey) == "" {
+		return
+	}
+	if site.errorKey == "" || site.errorKey == errorKey {
+		site.errorKey = errorKey
+		return
+	}
+	site.errorKey = downstreamConsumptionMultipleErrors
+}
+
+func downstreamConsumptionSafeErrorKey(err error) string {
+	var requestErr *upstream.RequestError
+	if errors.As(err, &requestErr) && strings.HasPrefix(requestErr.MessageKey, "admin.upstream.errors.") {
+		return requestErr.MessageKey
+	}
+	return downstreamConsumptionSessionUnavailableError
+}
+
+func downstreamConsumptionItemsInOrder(items map[string]DownstreamConsumptionItem, siteIDs []string) []DownstreamConsumptionItem {
+	ordered := make([]DownstreamConsumptionItem, 0, len(siteIDs))
+	for _, siteID := range siteIDs {
+		ordered = append(ordered, items[siteID])
+	}
+	return ordered
+}
+
+func downstreamConsumptionStartDate(value string) (string, error) {
+	parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(value))
+	if err != nil {
+		return "", err
+	}
+	return parsed.In(downstreamConsumptionTimeZone).Format("2006-01-02"), nil
+}
+
+func loadLocationOrUTC(name string) *time.Location {
+	location, err := time.LoadLocation(name)
+	if err != nil {
+		return time.UTC
+	}
+	return location
 }
 
 // ListRealConnectionsForWorkspace 按显式传入的 userID + adminAccountID 查询真实对接绑定记录，

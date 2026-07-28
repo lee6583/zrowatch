@@ -26,6 +26,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/my-sites/upstream-keys", handler.listUpstreamKeys)
 	mux.HandleFunc("GET /api/my-sites/admin-resources", handler.listAdminResources)
 	mux.HandleFunc("GET /api/my-sites/real-connections", handler.listRealConnections)
+	mux.HandleFunc("GET /api/my-sites/downstream-consumption", handler.downstreamConsumption)
 	mux.HandleFunc("PATCH /api/my-sites/real-connections/{connectionId}/groups", handler.updateRealConnectionGroups)
 	mux.HandleFunc("POST /api/my-sites/real-disconnect", handler.realDisconnect)
 }
@@ -230,6 +231,20 @@ func (h *Handler) listRealConnections(w http.ResponseWriter, r *http.Request) {
 		connections = []RealConnection{}
 	}
 	httpjson.Write(w, http.StatusOK, connections)
+}
+
+func (h *Handler) downstreamConsumption(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	response, err := h.service.DownstreamConsumption(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, response)
 }
 
 func (h *Handler) updateRealConnectionGroups(w http.ResponseWriter, r *http.Request) {

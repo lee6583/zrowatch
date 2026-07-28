@@ -11,8 +11,9 @@ import (
 
 type groupRateMonitorRepository interface {
 	GetGroupRateMonitorSettings(ctx context.Context, userID, adminAccountID string) (GroupRateMonitorSettings, error)
-	SaveGroupRateMonitorSettings(ctx context.Context, settings GroupRateMonitorSettings, overrides []GroupRateMonitorOverride) error
+	SaveGroupRateMonitorSettings(ctx context.Context, settings GroupRateMonitorSettings, typeDefaults []GroupRateMonitorTypeDefault, overrides []GroupRateMonitorOverride) error
 	ListEnabledGroupRateMonitorSettings(ctx context.Context) ([]GroupRateMonitorSettings, error)
+	ListGroupRateMonitorTypeDefaults(ctx context.Context, userID, adminAccountID string) ([]GroupRateMonitorTypeDefault, error)
 	ListGroupRateMonitorOverrides(ctx context.Context, userID, adminAccountID string) ([]GroupRateMonitorOverride, error)
 	GetGroupRateMonitorState(ctx context.Context, userID, adminAccountID, siteID, groupKey, targetID string) (*GroupRateMonitorTargetState, error)
 	UpsertGroupRateMonitorState(ctx context.Context, state GroupRateMonitorTargetState) error
@@ -40,7 +41,7 @@ func (r *Repository) GetGroupRateMonitorSettings(ctx context.Context, userID, ad
 	return settings, err
 }
 
-func (r *Repository) SaveGroupRateMonitorSettings(ctx context.Context, settings GroupRateMonitorSettings, overrides []GroupRateMonitorOverride) error {
+func (r *Repository) SaveGroupRateMonitorSettings(ctx context.Context, settings GroupRateMonitorSettings, typeDefaults []GroupRateMonitorTypeDefault, overrides []GroupRateMonitorOverride) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -60,6 +61,22 @@ func (r *Repository) SaveGroupRateMonitorSettings(ctx context.Context, settings 
 		return err
 	}
 	if _, err = tx.Exec(ctx, `
+		DELETE FROM connection_health_group_rate_monitor_type_defaults
+		WHERE user_id = $1 AND admin_account_id = $2
+	`, settings.UserID, settings.AdminAccountID); err != nil {
+		return err
+	}
+	for _, item := range typeDefaults {
+		if _, err = tx.Exec(ctx, `
+			INSERT INTO connection_health_group_rate_monitor_type_defaults (
+				user_id, admin_account_id, group_type, enabled, probe_interval_seconds, failure_threshold, model, updated_at
+			) VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+		`, settings.UserID, settings.AdminAccountID, item.GroupType, item.Enabled,
+			item.ProbeIntervalSeconds, item.FailureThreshold, item.Model); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(ctx, `
 		DELETE FROM connection_health_group_rate_monitor_overrides
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, settings.UserID, settings.AdminAccountID); err != nil {
@@ -67,16 +84,41 @@ func (r *Repository) SaveGroupRateMonitorSettings(ctx context.Context, settings 
 	}
 	for _, override := range overrides {
 		if _, err = tx.Exec(ctx, `
-			INSERT INTO connection_health_group_rate_monitor_overrides (
-				user_id, admin_account_id, upstream_site_id, upstream_group_key,
-				upstream_group_id, upstream_group_name, enabled, model, updated_at
-			) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
-		`, settings.UserID, settings.AdminAccountID, override.UpstreamSiteID, override.UpstreamGroupKey,
-			override.UpstreamGroupID, override.UpstreamGroupName, override.Enabled, override.Model); err != nil {
+				INSERT INTO connection_health_group_rate_monitor_overrides (
+					user_id, admin_account_id, upstream_site_id, upstream_group_key,
+					upstream_group_id, upstream_group_name, enabled, model, probe_interval_seconds, failure_threshold, updated_at
+				) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,now())
+			`, settings.UserID, settings.AdminAccountID, override.UpstreamSiteID, override.UpstreamGroupKey,
+			override.UpstreamGroupID, override.UpstreamGroupName, override.Enabled, override.Model,
+			override.ProbeIntervalSeconds, override.FailureThreshold); err != nil {
 			return err
 		}
 	}
 	return tx.Commit(ctx)
+}
+
+func (r *Repository) ListGroupRateMonitorTypeDefaults(ctx context.Context, userID, adminAccountID string) ([]GroupRateMonitorTypeDefault, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT group_type, enabled, probe_interval_seconds, failure_threshold, model, updated_at
+		FROM connection_health_group_rate_monitor_type_defaults
+		WHERE user_id = $1 AND admin_account_id = $2
+		ORDER BY group_type
+	`, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]GroupRateMonitorTypeDefault, 0)
+	for rows.Next() {
+		var item GroupRateMonitorTypeDefault
+		item.UserID = userID
+		item.AdminAccountID = adminAccountID
+		if err := rows.Scan(&item.GroupType, &item.Enabled, &item.ProbeIntervalSeconds, &item.FailureThreshold, &item.Model, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		result = append(result, item)
+	}
+	return result, rows.Err()
 }
 
 func (r *Repository) ListEnabledGroupRateMonitorSettings(ctx context.Context) ([]GroupRateMonitorSettings, error) {
@@ -103,7 +145,8 @@ func (r *Repository) ListEnabledGroupRateMonitorSettings(ctx context.Context) ([
 
 func (r *Repository) ListGroupRateMonitorOverrides(ctx context.Context, userID, adminAccountID string) ([]GroupRateMonitorOverride, error) {
 	rows, err := r.db.Query(ctx, `
-		SELECT upstream_site_id, upstream_group_key, upstream_group_id, upstream_group_name, enabled, model, updated_at
+		SELECT upstream_site_id, upstream_group_key, upstream_group_id, upstream_group_name, enabled, model,
+			probe_interval_seconds, failure_threshold, updated_at
 		FROM connection_health_group_rate_monitor_overrides
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -117,7 +160,8 @@ func (r *Repository) ListGroupRateMonitorOverrides(ctx context.Context, userID, 
 		override.UserID = userID
 		override.AdminAccountID = adminAccountID
 		if err := rows.Scan(&override.UpstreamSiteID, &override.UpstreamGroupKey, &override.UpstreamGroupID,
-			&override.UpstreamGroupName, &override.Enabled, &override.Model, &override.UpdatedAt); err != nil {
+			&override.UpstreamGroupName, &override.Enabled, &override.Model, &override.ProbeIntervalSeconds,
+			&override.FailureThreshold, &override.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, override)

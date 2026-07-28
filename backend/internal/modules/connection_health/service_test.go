@@ -18,33 +18,35 @@ import (
 
 // fakeRepository 是 healthRepository 的内存实现，供 service 单测使用，不连接真实数据库。
 type fakeRepository struct {
-	policies           []Policy
-	states             map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
-	events             []ConnectionHealthEvent
-	assignments        []PolicyAssignment
-	groupAssignments   []GroupPolicyAssignment
-	groupExclusions    []GroupTargetExclusion
-	priorityStates     map[string]PrioritySyncState
-	targetActionStates map[string]TargetActionState
-	groupRateSettings  map[string]GroupRateMonitorSettings
-	groupRateOverrides map[string][]GroupRateMonitorOverride
-	groupRateStates    map[string]GroupRateMonitorTargetState
-	groupRateCycles    []GroupRateProbeCycle
-	groupRateActions   map[string]GroupRateMonitorActionState
-	budgetClaims       map[string]int
-	savePolicyErr      error
+	policies              []Policy
+	states                map[string]map[string]ConnectionHealthState // connectionID -> modelName -> state
+	events                []ConnectionHealthEvent
+	assignments           []PolicyAssignment
+	groupAssignments      []GroupPolicyAssignment
+	groupExclusions       []GroupTargetExclusion
+	priorityStates        map[string]PrioritySyncState
+	targetActionStates    map[string]TargetActionState
+	groupRateSettings     map[string]GroupRateMonitorSettings
+	groupRateTypeDefaults map[string][]GroupRateMonitorTypeDefault
+	groupRateOverrides    map[string][]GroupRateMonitorOverride
+	groupRateStates       map[string]GroupRateMonitorTargetState
+	groupRateCycles       []GroupRateProbeCycle
+	groupRateActions      map[string]GroupRateMonitorActionState
+	budgetClaims          map[string]int
+	savePolicyErr         error
 }
 
 func newFakeRepository() *fakeRepository {
 	return &fakeRepository{
-		states:             map[string]map[string]ConnectionHealthState{},
-		priorityStates:     map[string]PrioritySyncState{},
-		targetActionStates: map[string]TargetActionState{},
-		groupRateSettings:  map[string]GroupRateMonitorSettings{},
-		groupRateOverrides: map[string][]GroupRateMonitorOverride{},
-		groupRateStates:    map[string]GroupRateMonitorTargetState{},
-		groupRateActions:   map[string]GroupRateMonitorActionState{},
-		budgetClaims:       map[string]int{},
+		states:                map[string]map[string]ConnectionHealthState{},
+		priorityStates:        map[string]PrioritySyncState{},
+		targetActionStates:    map[string]TargetActionState{},
+		groupRateSettings:     map[string]GroupRateMonitorSettings{},
+		groupRateTypeDefaults: map[string][]GroupRateMonitorTypeDefault{},
+		groupRateOverrides:    map[string][]GroupRateMonitorOverride{},
+		groupRateStates:       map[string]GroupRateMonitorTargetState{},
+		groupRateActions:      map[string]GroupRateMonitorActionState{},
+		budgetClaims:          map[string]int{},
 	}
 }
 

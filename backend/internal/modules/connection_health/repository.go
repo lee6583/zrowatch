@@ -215,6 +215,19 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			updated_at timestamptz NOT NULL DEFAULT now(),
 			PRIMARY KEY (user_id, admin_account_id, upstream_site_id, upstream_group_key)
 		)`,
+		`ALTER TABLE connection_health_group_rate_monitor_overrides ADD COLUMN IF NOT EXISTS probe_interval_seconds integer NULL`,
+		`ALTER TABLE connection_health_group_rate_monitor_overrides ADD COLUMN IF NOT EXISTS failure_threshold integer NULL`,
+		`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_type_defaults (
+			user_id text NOT NULL,
+			admin_account_id text NOT NULL DEFAULT '',
+			group_type text NOT NULL,
+			model text NOT NULL DEFAULT '',
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, admin_account_id, group_type)
+		)`,
+		`ALTER TABLE connection_health_group_rate_monitor_type_defaults ADD COLUMN IF NOT EXISTS enabled boolean NOT NULL DEFAULT true`,
+		`ALTER TABLE connection_health_group_rate_monitor_type_defaults ADD COLUMN IF NOT EXISTS probe_interval_seconds integer NOT NULL DEFAULT 30`,
+		`ALTER TABLE connection_health_group_rate_monitor_type_defaults ADD COLUMN IF NOT EXISTS failure_threshold integer NOT NULL DEFAULT 2`,
 		`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_states (
 			user_id text NOT NULL,
 			admin_account_id text NOT NULL DEFAULT '',

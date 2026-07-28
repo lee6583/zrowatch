@@ -228,7 +228,32 @@ export interface GroupRateMonitorSettings {
   probeIntervalSeconds: number
   failureThreshold: number
   defaultModel: string
+  typeDefaults: GroupRateMonitorTypeDefault[]
+  groups: GroupRateMonitorGroupConfig[]
   restore: GroupRateMonitorRestoreSummary
+}
+
+export interface GroupRateMonitorTypeDefault {
+  groupType: string
+  enabled: boolean
+  probeIntervalSeconds: number
+  failureThreshold: number
+  model: string
+}
+
+export interface GroupRateMonitorGroupConfig {
+  upstreamSiteId: string
+  upstreamSiteName: string
+  upstreamGroupId: string
+  upstreamGroupName: string
+  groupType: string
+  enabled: boolean
+  model: string
+  probeIntervalSeconds: number | null
+  failureThreshold: number | null
+  resolvedModel: string
+  resolvedProbeIntervalSeconds: number
+  resolvedFailureThreshold: number
 }
 
 export interface GroupRateMonitorSettingsInput {
@@ -236,6 +261,16 @@ export interface GroupRateMonitorSettingsInput {
   probeIntervalSeconds: number
   failureThreshold: number
   defaultModel: string
+  typeDefaults: GroupRateMonitorTypeDefault[]
+  overrides: Array<{
+    upstreamSiteId: string
+    upstreamGroupId: string
+    upstreamGroupName: string
+    enabled: boolean
+    model: string
+    probeIntervalSeconds: number | null
+    failureThreshold: number | null
+  }>
 }
 
 export interface GroupRateManualProbeInput {

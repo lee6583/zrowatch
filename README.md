@@ -109,14 +109,30 @@ Production compose files live under `deploy/`.
 git clone https://github.com/deviseo/transit-hub.git transit-hub
 cd transit-hub
 
-# Edit deploy/docker-compose.prod.yml first:
-# - image tag (defaults to deviseo/transithub:v0.1.12)
-# - replace every change-this-* placeholder
-# - database password in both DATABASE_URL and POSTGRES_PASSWORD
-# - ADMIN_EMAIL / ADMIN_PASSWORD
+# Create the production env file first:
+# cp deploy/.env.example .env
+# Then set APP_IMAGE, DB_PASSWORD, ADMIN_EMAIL, and ADMIN_PASSWORD.
 
-docker compose -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
 ```
+
+### CI/CD
+
+Recommended release flow:
+
+1. Push to `main`.
+2. GitHub Actions builds `deploy/Dockerfile`.
+3. The workflow pushes a new image to GHCR and SSHes to the server to restart only `app`.
+
+You need these GitHub secrets:
+
+- `DEPLOY_HOST`
+- `DEPLOY_USER`
+- `DEPLOY_SSH_KEY`
+
+If your GHCR package is private, do a one-time `docker login ghcr.io` on the server with a token that has `read:packages`.
+
+Use `deploy/.env.example` as the template for `/opt/services/zrowatch/.env`.
 
 Open:
 

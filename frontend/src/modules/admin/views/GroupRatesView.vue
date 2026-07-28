@@ -13,7 +13,7 @@ import { getBoundDispatchAccounts, getGroupRateMonitorSettings, getGroupRateMoni
 import { listUpstreamSites, syncAllUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
-import type { BoundDispatchAccountState, GroupRateMonitorSettings, GroupRateMonitorSummary, GroupRateProbeCycle } from '../types/connectionHealth'
+import type { BoundDispatchAccountState, GroupRateMonitorGroupConfig, GroupRateMonitorSettings, GroupRateMonitorSummary, GroupRateProbeCycle } from '../types/connectionHealth'
 import type { AdminResourceOption, ConnectionCapabilities, MySiteMapping, MySiteMappingOwnGroupOption, RealConnection, UpstreamKeyItem } from '../types/mySites'
 import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
@@ -36,6 +36,7 @@ const {
   sortMode,
   statusCounts,
   serverSupportsStatusFilters,
+  search,
   isLoading,
   isHistoryLoading,
   isActionLoading,
@@ -63,7 +64,7 @@ const ownGroups = ref<MySiteMappingOwnGroupOption[]>([])
 const mySiteMappings = ref<MySiteMapping[]>([])
 const hasLoadedMappingOptions = ref(false)
 const connectionCapabilities = ref<ConnectionCapabilities | null>(null)
-const searchQuery = ref('')
+const searchQuery = ref(search.value)
 const realConnectionsData = ref<RealConnection[]>([])
 const disconnectingRate = ref<GroupRate | null>(null)
 const disconnectMode = ref<'unlink' | 'full'>('unlink')
@@ -90,6 +91,7 @@ const isLoadingHealthSettings = ref(false)
 const isSavingHealthSettings = ref(false)
 const healthSettingsErrorKey = ref('')
 const healthSettingsDraft = ref<GroupRateMonitorSettings | null>(null)
+const healthSettingsGroupType = ref('')
 const flashingHealthGroups = ref<Set<string>>(new Set())
 const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || connectionEditingRate.value || disconnectingRate.value || isHealthSettingsOpen.value))
 let previouslyFocusedElement: HTMLElement | null = null
@@ -428,8 +430,11 @@ const openHealthSettings = async () => {
     const settings = await getGroupRateMonitorSettings()
     healthSettingsDraft.value = {
       ...settings,
+      typeDefaults: settings.typeDefaults.map(item => ({ ...item })),
+      groups: settings.groups.map(group => ({ ...group })),
       restore: { ...settings.restore },
     }
+    healthSettingsGroupType.value = healthSettingsGroupTypes.value[0] ?? ''
   } catch (error) {
     healthSettingsErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsLoadFailed'
   } finally {
@@ -440,26 +445,44 @@ const openHealthSettings = async () => {
 const closeHealthSettings = () => {
   isHealthSettingsOpen.value = false
   healthSettingsDraft.value = null
+  healthSettingsGroupType.value = ''
   healthSettingsErrorKey.value = ''
 }
 
 const saveHealthSettings = async () => {
   const draft = healthSettingsDraft.value
   if (!draft || isSavingHealthSettings.value) return
-  if (draft.enabled && !draft.defaultModel.trim()) {
-    healthSettingsErrorKey.value = 'admin.groupRates.health.errors.modelRequired'
-    return
-  }
   isSavingHealthSettings.value = true
   healthSettingsErrorKey.value = ''
   try {
     const saved = await saveGroupRateMonitorSettings({
-      enabled: draft.enabled,
+      enabled: draft.typeDefaults.some(item => item.enabled),
       probeIntervalSeconds: Number(draft.probeIntervalSeconds),
       failureThreshold: Number(draft.failureThreshold),
       defaultModel: draft.defaultModel.trim(),
+      typeDefaults: draft.typeDefaults.map(item => ({
+        groupType: item.groupType,
+        enabled: item.enabled,
+        probeIntervalSeconds: Number(item.probeIntervalSeconds),
+        failureThreshold: Number(item.failureThreshold),
+        model: item.model.trim(),
+      })),
+      overrides: draft.groups.map(group => ({
+        upstreamSiteId: group.upstreamSiteId,
+        upstreamGroupId: group.upstreamGroupId,
+        upstreamGroupName: group.upstreamGroupName,
+        enabled: group.enabled,
+        model: group.model.trim(),
+        probeIntervalSeconds: group.probeIntervalSeconds,
+        failureThreshold: group.failureThreshold,
+      })),
     })
-    healthSettingsDraft.value = { ...saved, restore: { ...saved.restore } }
+    healthSettingsDraft.value = {
+      ...saved,
+      typeDefaults: saved.typeDefaults.map(item => ({ ...item })),
+      groups: saved.groups.map(group => ({ ...group })),
+      restore: { ...saved.restore },
+    }
     closeHealthSettings()
     await loadHealthSummaries(true)
   } catch (error) {
@@ -468,6 +491,43 @@ const saveHealthSettings = async () => {
     isSavingHealthSettings.value = false
   }
 }
+
+const setGroupProbeInterval = (group: GroupRateMonitorGroupConfig, event: Event) => {
+  const raw = (event.target as HTMLInputElement).value.trim()
+  group.probeIntervalSeconds = raw === '' ? null : Number(raw)
+}
+
+const setGroupFailureThreshold = (group: GroupRateMonitorGroupConfig, event: Event) => {
+  const raw = (event.target as HTMLInputElement).value.trim()
+  group.failureThreshold = raw === '' ? null : Number(raw)
+}
+
+const healthSettingsGroupTypes = computed(() => {
+  const groups = healthSettingsDraft.value?.groups ?? []
+  return [...new Set(groups.map(group => group.groupType.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b))
+})
+
+const filteredHealthSettingsGroups = computed(() => {
+  const groups = healthSettingsDraft.value?.groups ?? []
+  if (!healthSettingsGroupType.value) return []
+  return groups.filter(group => group.groupType === healthSettingsGroupType.value)
+})
+
+const selectedHealthTypeDefaults = computed(() => (
+  healthSettingsDraft.value?.typeDefaults.find(item => item.groupType === healthSettingsGroupType.value) ?? null
+))
+
+const inheritedModelForGroup = (group: GroupRateMonitorGroupConfig): string => {
+  return healthSettingsDraft.value?.typeDefaults.find(item => item.groupType === group.groupType)?.model.trim() ?? ''
+}
+
+const inheritedIntervalForGroup = (group: GroupRateMonitorGroupConfig): number => (
+  healthSettingsDraft.value?.typeDefaults.find(item => item.groupType === group.groupType)?.probeIntervalSeconds ?? 30
+)
+
+const inheritedFailureThresholdForGroup = (group: GroupRateMonitorGroupConfig): number => (
+  healthSettingsDraft.value?.typeDefaults.find(item => item.groupType === group.groupType)?.failureThreshold ?? 2
+)
 
 const probeHealthRate = async (rate: GroupRate) => {
   const key = rateHealthKey(rate.siteId, rate.groupId, rate.groupName)
@@ -542,9 +602,18 @@ const canGoNext = computed(() => page.value < totalPages.value && !isLoading.val
 watch(searchQuery, (value) => {
   if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
   searchDebounceTimer = setTimeout(() => {
+    searchDebounceTimer = null
     void setSearch(value)
   }, 300)
 })
+
+const submitSearch = () => {
+  if (searchDebounceTimer) {
+    clearTimeout(searchDebounceTimer)
+    searchDebounceTimer = null
+  }
+  void setSearch(searchQuery.value)
+}
 
 watch(statusFilter, (status) => {
   if (status === 'mapped') startHealthPolling()
@@ -1210,6 +1279,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             autocomplete="off"
             spellcheck="false"
             class="h-11 w-full rounded-lg border border-border/50 bg-surface pl-10 pr-4 text-sm text-foreground outline-none transition-[color,background-color,border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
+            @keydown.enter.prevent="submitSearch"
           />
         </div>
 
@@ -1300,7 +1370,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
               <th v-if="statusFilter !== 'mapped'" class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.effectiveMultiplier') }}</th>
               <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.delta') }}</th>
               <th v-if="statusFilter === 'mapped'" class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.health') }}</th>
-              <th class="px-6 py-3 font-medium text-muted-foreground">{{ t('admin.groupRates.fields.updatedAt') }}</th>
+              <th class="px-6 py-3 font-medium text-muted-foreground">
+                {{ t(statusFilter === 'mapped' ? 'admin.groupRates.fields.latestProbe' : 'admin.groupRates.fields.updatedAt') }}
+              </th>
               <th class="px-6 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.fields.dispatch') }}</th>
               <th class="px-6 py-3 text-right font-medium text-muted-foreground">{{ t('admin.groupRates.fields.actions') }}</th>
             </tr>
@@ -1403,7 +1475,9 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                   </span>
                 </div>
               </td>
-              <td class="px-4 py-2.5 text-muted-foreground tabular-nums">{{ formatDateTime(rate.updatedAt) }}</td>
+              <td class="px-4 py-2.5 text-muted-foreground tabular-nums">
+                {{ formatDateTime(statusFilter === 'mapped' ? (healthSummaryForRate(rate)?.latestProbeAt ?? null) : rate.updatedAt) }}
+              </td>
               <td class="px-4 py-2.5 text-center">
                 <button
                   v-if="supportsDispatch(rate)"
@@ -1510,11 +1584,10 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     </div>
 
     <div v-if="isHealthSettingsOpen" class="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4 backdrop-blur-sm">
-      <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-health-settings-title" tabindex="-1" class="flex max-h-[calc(100dvh-2rem)] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-xl">
+      <div data-group-rates-dialog role="dialog" aria-modal="true" aria-labelledby="group-rate-health-settings-title" tabindex="-1" class="flex max-h-[calc(100dvh-2rem)] w-full max-w-5xl flex-col overflow-hidden rounded-xl border border-border/50 bg-card shadow-xl">
         <div class="flex items-start justify-between gap-4 border-b border-border/50 p-6">
           <div>
             <h2 id="group-rate-health-settings-title" class="text-xl font-semibold text-foreground">{{ t('admin.groupRates.health.settings.title') }}</h2>
-            <p class="mt-2 text-sm text-muted-foreground">{{ t('admin.groupRates.health.settings.description') }}</p>
           </div>
           <button class="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground" :disabled="isSavingHealthSettings" @click="closeHealthSettings">
             <X class="h-5 w-5" />
@@ -1529,39 +1602,122 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
 
         <div v-else-if="healthSettingsDraft" class="min-h-0 flex-1 overflow-y-auto">
           <div class="p-6">
-            <div class="flex items-center justify-between gap-6">
-              <div>
-                <div class="font-medium text-foreground">{{ t('admin.groupRates.health.settings.enabled') }}</div>
-                <div class="mt-1 text-sm text-muted-foreground">{{ t('admin.groupRates.health.settings.enabledHint') }}</div>
-              </div>
-              <button
-                type="button"
-                role="switch"
-                :aria-checked="healthSettingsDraft.enabled"
-                :class="[
-                  'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
-                  healthSettingsDraft.enabled ? 'border-emerald-500/40 bg-emerald-500' : 'border-border/70 bg-muted',
-                ]"
-                @click="healthSettingsDraft.enabled = !healthSettingsDraft.enabled"
-              >
-                <span :class="['h-4 w-4 rounded-full bg-white shadow-sm transition-transform', healthSettingsDraft.enabled ? 'translate-x-5' : 'translate-x-1']" />
-              </button>
-            </div>
+            <label v-if="healthSettingsGroupTypes.length" class="block w-full sm:w-72">
+              <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.groupTypeFilter') }}</span>
+              <Select v-model="healthSettingsGroupType" class="w-full">
+                <option v-for="groupType in healthSettingsGroupTypes" :key="groupType" :value="groupType">{{ groupType }}</option>
+              </Select>
+            </label>
 
-            <div class="mt-6 grid gap-4 sm:grid-cols-3">
-              <label class="block">
-                <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.interval') }}</span>
-                <input v-model.number="healthSettingsDraft.probeIntervalSeconds" type="number" min="10" max="86400" step="1" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30" />
-              </label>
-              <label class="block">
-                <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.failureThreshold') }}</span>
-                <input v-model.number="healthSettingsDraft.failureThreshold" type="number" min="1" max="10" step="1" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30" />
-              </label>
-              <label class="block">
-                <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.defaultModel') }}</span>
-                <Input v-model="healthSettingsDraft.defaultModel" :placeholder="t('admin.groupRates.health.settings.modelPlaceholder')" autocomplete="off" />
-              </label>
-            </div>
+            <section v-if="selectedHealthTypeDefaults" class="mt-6 border-t border-border/50 pt-6">
+              <h3 class="mb-5 text-sm font-semibold text-foreground">
+                {{ t('admin.groupRates.health.settings.typeDefaults', { type: healthSettingsGroupType }) }}
+              </h3>
+              <div class="flex items-center justify-between gap-6">
+                <div class="font-medium text-foreground">{{ t('admin.groupRates.health.settings.enabled') }}</div>
+                <button
+                  type="button"
+                  role="switch"
+                  :aria-checked="selectedHealthTypeDefaults.enabled"
+                  :class="[
+                    'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                    selectedHealthTypeDefaults.enabled ? 'border-emerald-500/40 bg-emerald-500' : 'border-border/70 bg-muted',
+                  ]"
+                  @click="selectedHealthTypeDefaults.enabled = !selectedHealthTypeDefaults.enabled"
+                >
+                  <span :class="['h-4 w-4 rounded-full bg-white shadow-sm transition-transform', selectedHealthTypeDefaults.enabled ? 'translate-x-5' : 'translate-x-1']" />
+                </button>
+              </div>
+
+              <div class="mt-6 grid gap-4 sm:grid-cols-3">
+                <label class="block">
+                  <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.interval') }}</span>
+                  <input v-model.number="selectedHealthTypeDefaults.probeIntervalSeconds" type="number" min="10" max="86400" step="1" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30" />
+                </label>
+                <label class="block">
+                  <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.failureThreshold') }}</span>
+                  <input v-model.number="selectedHealthTypeDefaults.failureThreshold" type="number" min="1" max="10" step="1" class="h-11 w-full rounded-lg border border-border/70 bg-surface px-3 text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30" />
+                </label>
+                <label class="block">
+                  <span class="mb-2 block text-sm font-medium text-foreground">{{ t('admin.groupRates.health.settings.defaultModel') }}</span>
+                  <Input v-model="selectedHealthTypeDefaults.model" :placeholder="t('admin.groupRates.health.settings.modelPlaceholder')" autocomplete="off" />
+                </label>
+              </div>
+            </section>
+
+            <section v-if="selectedHealthTypeDefaults" class="mt-8 border-t border-border/50 pt-6">
+              <h3 class="text-sm font-semibold text-foreground">{{ t('admin.groupRates.health.settings.groupOverrides') }}</h3>
+              <div class="mt-4 overflow-x-auto rounded-lg border border-border/60">
+                <table class="w-full min-w-[920px] text-sm">
+                  <thead class="border-b border-border/60 bg-surface-elevated/70">
+                    <tr>
+                      <th class="px-4 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.health.settings.group') }}</th>
+                      <th class="px-4 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.health.settings.autoProbe') }}</th>
+                      <th class="px-4 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.health.settings.model') }}</th>
+                      <th class="px-4 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.health.settings.groupInterval') }}</th>
+                      <th class="px-4 py-3 text-center font-medium text-muted-foreground">{{ t('admin.groupRates.health.settings.groupFailureThreshold') }}</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-border/50">
+                    <tr v-for="group in filteredHealthSettingsGroups" :key="`${group.upstreamSiteId}-${group.upstreamGroupId || group.upstreamGroupName}`">
+                      <td class="px-4 py-3">
+                        <div class="font-medium text-foreground">{{ group.upstreamGroupName }}</div>
+                        <div class="mt-0.5 text-xs text-muted-foreground">{{ group.upstreamSiteName || group.upstreamSiteId }}</div>
+                      </td>
+                      <td class="px-4 py-3 text-center">
+                        <button
+                          type="button"
+                          role="switch"
+                          :aria-checked="group.enabled"
+                          :aria-label="t('admin.groupRates.health.settings.groupAutoProbeLabel', { group: group.upstreamGroupName })"
+                          :class="[
+                            'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary',
+                            group.enabled ? 'border-emerald-500/40 bg-emerald-500' : 'border-border/70 bg-muted',
+                          ]"
+                          @click="group.enabled = !group.enabled"
+                        >
+                          <span :class="['h-4 w-4 rounded-full bg-white shadow-sm transition-transform', group.enabled ? 'translate-x-5' : 'translate-x-1']" />
+                        </button>
+                      </td>
+                      <td class="w-[260px] px-4 py-3">
+                        <Input
+                          v-model="group.model"
+                          :placeholder="inheritedModelForGroup(group) || t('admin.groupRates.health.settings.modelPlaceholder')"
+                          autocomplete="off"
+                        />
+                      </td>
+                      <td class="w-[150px] px-4 py-3">
+                        <input
+                          :value="group.probeIntervalSeconds ?? ''"
+                          type="number"
+                          min="10"
+                          max="86400"
+                          step="1"
+                          :placeholder="String(inheritedIntervalForGroup(group))"
+                          class="h-10 w-full rounded-lg border border-border/70 bg-surface px-3 text-center text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
+                          @input="setGroupProbeInterval(group, $event)"
+                        />
+                      </td>
+                      <td class="w-[150px] px-4 py-3">
+                        <input
+                          :value="group.failureThreshold ?? ''"
+                          type="number"
+                          min="1"
+                          max="10"
+                          step="1"
+                          :placeholder="String(inheritedFailureThresholdForGroup(group))"
+                          class="h-10 w-full rounded-lg border border-border/70 bg-surface px-3 text-center text-sm text-foreground outline-none focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary/30"
+                          @input="setGroupFailureThreshold(group, $event)"
+                        />
+                      </td>
+                    </tr>
+                    <tr v-if="filteredHealthSettingsGroups.length === 0">
+                      <td colspan="5" class="px-4 py-8 text-center text-muted-foreground">{{ t('admin.groupRates.health.settings.noGroups') }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         </div>
 

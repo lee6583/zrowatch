@@ -12,6 +12,7 @@ import type {
   UpdateRealConnectionGroupsRequest,
   UpstreamKeyItem,
   AdminResourceOption,
+  DownstreamConsumptionResponse,
 } from '../types/mySites'
 import {
   authUnauthorizedErrorKey,
@@ -124,6 +125,15 @@ export const realConnect = async (req: RealConnectRequest): Promise<RealConnectR
 
 export const listRealConnections = async (): Promise<RealConnection[]> =>
   requestJson<RealConnection[]>('/my-sites/real-connections')
+
+export const getDownstreamConsumption = async (): Promise<DownstreamConsumptionResponse> => {
+  const response = await requestJson<DownstreamConsumptionResponse>('/my-sites/downstream-consumption')
+  return {
+    currency: response.currency ?? 'CNY',
+    period: response.period ?? 'since_connection',
+    items: Array.isArray(response.items) ? response.items : [],
+  }
+}
 
 export const listUpstreamKeys = async (siteId: string, groupId: string, groupName: string): Promise<UpstreamKeyItem[]> => {
   const params = new URLSearchParams({ siteId, groupId, groupName })

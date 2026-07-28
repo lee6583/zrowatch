@@ -63,6 +63,25 @@ export interface MySiteMappingOptionsResponse {
   connectionCapabilities?: ConnectionCapabilities
 }
 
+export type DownstreamConsumptionStatus = 'available' | 'partial' | 'empty' | 'unsupported' | 'unavailable'
+
+export interface DownstreamConsumptionItem {
+  siteId: string
+  amount: number | null
+  accountCount: number
+  successfulAccountCount: number
+  failedAccountCount?: number
+  conflictAccountCount?: number
+  status: DownstreamConsumptionStatus
+  errorKey?: string
+}
+
+export interface DownstreamConsumptionResponse {
+  currency: 'CNY' | string
+  period: 'since_connection' | string
+  items: DownstreamConsumptionItem[]
+}
+
 export interface ConnectionCapabilities {
   mode: 'account' | 'channel' | string
   requiresGroupType: boolean

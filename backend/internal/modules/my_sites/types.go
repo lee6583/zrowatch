@@ -265,3 +265,32 @@ type RealConnection struct {
 	CanDeleteRemote         bool     `json:"canDeleteRemote"`
 	CreatedAt               string   `json:"createdAt"`
 }
+
+type DownstreamConsumptionStatus string
+
+const (
+	DownstreamConsumptionAvailable   DownstreamConsumptionStatus = "available"
+	DownstreamConsumptionPartial     DownstreamConsumptionStatus = "partial"
+	DownstreamConsumptionEmpty       DownstreamConsumptionStatus = "empty"
+	DownstreamConsumptionUnsupported DownstreamConsumptionStatus = "unsupported"
+	DownstreamConsumptionUnavailable DownstreamConsumptionStatus = "unavailable"
+)
+
+// DownstreamConsumptionItem 是按上游站点汇总的下游 Sub2API 实际扣费。
+// Amount 为 nil 表示没有可靠的完整金额，不应在前端显示为 0。
+type DownstreamConsumptionItem struct {
+	SiteID                 string                      `json:"siteId"`
+	Amount                 *float64                    `json:"amount"`
+	AccountCount           int                         `json:"accountCount"`
+	SuccessfulAccountCount int                         `json:"successfulAccountCount"`
+	FailedAccountCount     int                         `json:"failedAccountCount,omitempty"`
+	ConflictAccountCount   int                         `json:"conflictAccountCount,omitempty"`
+	Status                 DownstreamConsumptionStatus `json:"status"`
+	ErrorKey               string                      `json:"errorKey,omitempty"`
+}
+
+type DownstreamConsumptionResponse struct {
+	Currency string                      `json:"currency"`
+	Period   string                      `json:"period"`
+	Items    []DownstreamConsumptionItem `json:"items"`
+}

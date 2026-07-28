@@ -437,6 +437,33 @@ func (s *PlatformService) FetchSub2APIAdminUsageStats(session Session, startDate
 	return *cost, nil
 }
 
+// FetchSub2APIAdminAccountUsageStats 查询单个 Sub2API admin 转发账号在日期范围内的实际扣费。
+// accountID 是下游 Sub2API 的账号 ID，不是上游 key ID；返回金额保持站点实际扣费的 CNY 口径。
+func (s *PlatformService) FetchSub2APIAdminAccountUsageStats(session Session, accountID, startDate, endDate string) (float64, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return 0, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return 0, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	if _, err := strconv.ParseInt(accountID, 10, 64); err != nil {
+		return 0, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	statsURL := session.BaseURL + "/api/v1/admin/usage/stats?start_date=" + url.QueryEscape(startDate) +
+		"&end_date=" + url.QueryEscape(endDate) + "&account_id=" + url.QueryEscape(accountID) + "&timezone=Asia%2FShanghai"
+	response, err := s.httpClient.requestJSON(statsURL, adminAuthOptions(session))
+	if err != nil {
+		return 0, err
+	}
+	data := dataRecord(response.Payload)
+	cost := firstNumber(data, []string{"total_actual_cost", "totalActualCost", "total_cost", "totalCost"})
+	if cost == nil {
+		return 0, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	return *cost, nil
+}
+
 // FetchSub2APIAdminSiteBalance 使用默认过滤规则（排除 admin 角色）统计站点用户总余额。
 // my_sites 模块调用此方法时无需关心自定义筛选条件。
 func (s *PlatformService) FetchSub2APIAdminSiteBalance(session Session) (AdminSiteBalance, error) {

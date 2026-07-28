@@ -1,18 +1,19 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff } from 'lucide-vue-next'
+import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff, CircleHelp } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Tooltip } from '@/components/ui/tooltip'
-import { getMySiteMappingOptions, listRealConnections } from '../api/mySites'
+import { getDownstreamConsumption, getMySiteMappingOptions, listRealConnections } from '../api/mySites'
 import { getStrategySettings } from '../api/settings'
 import { useUpstreamSites } from '../composables/useUpstreamSites'
 import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
 import type { UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
+import type { DownstreamConsumptionItem, DownstreamConsumptionStatus } from '../types/mySites'
 
-const { t, locale } = useI18n()
+const { t, te, locale } = useI18n()
 
 const upstreamFilterStorageKey = 'transit-hub:admin:upstream-filters.v1'
 
@@ -46,6 +47,9 @@ const searchQuery = ref(typeof storedFilters.searchQuery === 'string' ? storedFi
 const platformFilter = ref(typeof storedFilters.platformFilter === 'string' ? storedFilters.platformFilter : '')
 const connectedGroupTypeFilter = ref(typeof storedFilters.connectedGroupTypeFilter === 'string' ? storedFilters.connectedGroupTypeFilter : '')
 const connectedGroupKeys = ref(new Set<string>())
+const downstreamConsumptionBySite = ref(new Map<string, DownstreamConsumptionItem>())
+const isLoadingDownstreamConsumption = ref(false)
+const downstreamConsumptionError = ref<string | null>(null)
 const groupTargetKey = (siteId: string, groupName: string): string => `${siteId}\u0000${groupName}`
 const isAddModalOpen = ref(false)
 const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
@@ -86,6 +90,7 @@ const scheduleNextRefresh = () => {
 const runRefresh = async () => {
   if (isRefreshing.value) return
   await streamRefreshSites()
+  await loadDownstreamConsumption()
   scheduleNextRefresh()
 }
 
@@ -294,6 +299,26 @@ const loadConnectedGroupKeys = async () => {
   }
 }
 
+const loadDownstreamConsumption = async () => {
+  if (isLoadingDownstreamConsumption.value) return
+  isLoadingDownstreamConsumption.value = true
+  downstreamConsumptionError.value = null
+  try {
+    const response = await getDownstreamConsumption()
+    downstreamConsumptionBySite.value = new Map(response.items.map(item => [item.siteId, item]))
+  } catch (error) {
+    downstreamConsumptionBySite.value = new Map()
+    downstreamConsumptionError.value = error instanceof Error ? error.message : 'admin.upstream.errors.request'
+  } finally {
+    isLoadingDownstreamConsumption.value = false
+  }
+}
+
+const refreshSiteWithUsage = async (siteId: string) => {
+  await refreshSingleSite(siteId)
+  await loadDownstreamConsumption()
+}
+
 const openGroupsModal = (site: UpstreamSite) => {
   selectedSiteForGroups.value = site
   isGroupsModalOpen.value = true
@@ -356,6 +381,65 @@ const connectedGroupPreview = (site: UpstreamSite): string => {
     : t('admin.upstream.fields.noConnectedGroups')
 }
 
+const downstreamConsumptionForSite = (site: UpstreamSite): DownstreamConsumptionItem | null => (
+  downstreamConsumptionBySite.value.get(site.id) ?? null
+)
+
+const downstreamConsumptionAmount = (item: DownstreamConsumptionItem | null): string => (
+  item?.amount === null || item?.amount === undefined ? '—' : `¥${item.amount.toFixed(2)}`
+)
+
+const downstreamConsumptionStatusLabel = (status: DownstreamConsumptionStatus): string => {
+  switch (status) {
+    case 'available':
+      return t('admin.upstream.downstreamConsumption.available')
+    case 'partial':
+      return t('admin.upstream.downstreamConsumption.partial')
+    case 'empty':
+      return t('admin.upstream.downstreamConsumption.empty')
+    case 'unsupported':
+      return t('admin.upstream.downstreamConsumption.unsupported')
+    default:
+      return t('admin.upstream.downstreamConsumption.unavailable')
+  }
+}
+
+const downstreamConsumptionRequestErrorLabel = (): string | null => {
+  const errorKey = downstreamConsumptionError.value
+  if (!errorKey) return null
+  return te(errorKey) ? t(errorKey) : t('admin.upstream.downstreamConsumption.unavailable')
+}
+
+const downstreamConsumptionItemErrorLabel = (item: DownstreamConsumptionItem): string | null => {
+  if (!item.errorKey) return null
+  return te(item.errorKey) ? t(item.errorKey) : t('admin.upstream.downstreamConsumption.unavailable')
+}
+
+const downstreamConsumptionTooltip = (site: UpstreamSite, item: DownstreamConsumptionItem | null): string => {
+  if (!item) {
+    const requestError = downstreamConsumptionRequestErrorLabel()
+    if (requestError) return requestError
+    return connectedGroupsForSite(site).length > 0
+      ? t('admin.upstream.downstreamConsumption.unavailable')
+      : t('admin.upstream.downstreamConsumption.empty')
+  }
+  switch (item.status) {
+    case 'available':
+      return t('admin.upstream.downstreamConsumption.help')
+    case 'partial':
+      return [downstreamConsumptionStatusLabel(item.status), t('admin.upstream.downstreamConsumption.accountProgress', {
+        success: item.successfulAccountCount,
+        total: item.accountCount,
+      }), downstreamConsumptionItemErrorLabel(item)].filter(Boolean).join(' · ')
+    case 'empty':
+      return t('admin.upstream.downstreamConsumption.empty')
+    case 'unsupported':
+      return t('admin.upstream.downstreamConsumption.unsupported')
+    default:
+      return downstreamConsumptionItemErrorLabel(item) ?? t('admin.upstream.downstreamConsumption.unavailable')
+  }
+}
+
 const cnyMetricDisplay = (site: UpstreamSite, metric: UpstreamMetricValue): string | null => {
   if (metric.value === null || !Number.isFinite(metric.value) || site.rechargeRate <= 0 || !Number.isFinite(site.rechargeRate)) return null
   return t('admin.upstream.currency.cnyValue', { amount: (metric.value * site.rechargeRate).toFixed(2) })
@@ -376,6 +460,7 @@ const lastUpdatedDisplay = (site: UpstreamSite): string => {
 onMounted(() => {
   void loadRefreshSettings()
   void loadConnectedGroupKeys()
+  void loadDownstreamConsumption()
 })
 
 onBeforeUnmount(() => {
@@ -444,10 +529,17 @@ onBeforeUnmount(() => {
           <thead class="bg-surface/50 text-muted-foreground border-b border-border/40">
             <tr>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.siteName') }}</th>
-              <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.platform') }}</th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.status.connected') }}</th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.balance') }}</th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.todayConsume') }}</th>
+              <th class="px-6 py-4 font-medium">
+                <Tooltip :text="t('admin.upstream.downstreamConsumption.help')" wide>
+                  <span class="inline-flex items-center gap-1.5">
+                    {{ t('admin.upstream.fields.downstreamConsume') }}
+                    <CircleHelp class="h-3.5 w-3.5 text-muted-foreground" />
+                  </span>
+                </Tooltip>
+              </th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.historyRecharge') }}</th>
               <th class="px-6 py-4 font-medium">{{ t('admin.upstream.fields.connectedGroups') }}</th>
               <th class="px-6 py-4 font-medium text-right">{{ t('admin.upstream.action.actions') }}</th>
@@ -464,11 +556,6 @@ onBeforeUnmount(() => {
                     {{ site.name }}
                   </a>
                 </div>
-              </td>
-              <td class="px-6 py-4">
-                <span class="px-2 py-1 rounded-md bg-primary/10 text-primary border border-primary/20 text-xs font-semibold uppercase tracking-wider">
-                  {{ t(`admin.upstream.modal.form.platforms.${site.platform}`) }}
-                </span>
               </td>
               <td class="px-6 py-4">
                 <div
@@ -519,6 +606,32 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
               </td>
+              <td class="min-w-[150px] px-6 py-4">
+                <div v-if="isLoadingDownstreamConsumption" class="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                  {{ t('admin.upstream.downstreamConsumption.loading') }}
+                </div>
+                <Tooltip v-else :text="downstreamConsumptionTooltip(site, downstreamConsumptionForSite(site))" wide>
+                  <div class="flex flex-col gap-0.5">
+                    <span
+                      :class="[
+                        'font-medium',
+                        downstreamConsumptionForSite(site)?.amount !== null && downstreamConsumptionForSite(site)?.amount !== undefined
+                          ? 'text-orange-500'
+                          : 'text-muted-foreground',
+                      ]"
+                    >
+                      {{ downstreamConsumptionAmount(downstreamConsumptionForSite(site)) }}
+                    </span>
+                    <span
+                      v-if="downstreamConsumptionForSite(site)?.status === 'partial'"
+                      class="text-xs font-medium text-warning"
+                    >
+                      {{ t('admin.upstream.downstreamConsumption.partial') }}
+                    </span>
+                  </div>
+                </Tooltip>
+              </td>
               <td class="px-6 py-4">
                 <div class="flex flex-col gap-0.5">
                   <span v-if="cnyMetricDisplay(site, site.metrics.historyRecharge)" class="font-medium text-muted-foreground">
@@ -561,7 +674,7 @@ onBeforeUnmount(() => {
                     <button
                       class="p-1.5 rounded-md text-muted-foreground hover:bg-primary/10 hover:text-primary transition-colors"
                       :disabled="syncingSiteIds.has(site.id)"
-                      @click="refreshSingleSite(site.id)"
+                      @click="refreshSiteWithUsage(site.id)"
                     >
                       <Loader2 v-if="syncingSiteIds.has(site.id)" class="w-4 h-4 animate-spin" />
                       <RefreshCw v-else class="w-4 h-4" />

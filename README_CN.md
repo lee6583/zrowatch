@@ -109,14 +109,30 @@ TransitHub 是一个自部署的后台运营中心，用于管理多个上游站
 git clone https://github.com/deviseo/transit-hub.git transit-hub
 cd transit-hub
 
-# 先编辑 deploy/docker-compose.prod.yml：
-# - 镜像 tag（默认使用 deviseo/transithub:v0.1.12）
-# - 替换所有 change-this-* 占位值
-# - DATABASE_URL 和 POSTGRES_PASSWORD 中的数据库密码
-# - ADMIN_EMAIL / ADMIN_PASSWORD
+# 先创建生产环境变量文件：
+# cp deploy/.env.example .env
+# 然后设置 APP_IMAGE、DB_PASSWORD、ADMIN_EMAIL、ADMIN_PASSWORD。
 
-docker compose -f deploy/docker-compose.prod.yml up -d
+docker compose --env-file .env -f deploy/docker-compose.prod.yml up -d
 ```
+
+### CI/CD
+
+推荐的发版流程：
+
+1. 推送到 `main`。
+2. GitHub Actions 构建 `deploy/Dockerfile`。
+3. 工作流把新镜像推到 GHCR，然后 SSH 到服务器只重启 `app`。
+
+你需要配置这些 GitHub secrets：
+
+- `DEPLOY_HOST`
+- `DEPLOY_USER`
+- `DEPLOY_SSH_KEY`
+
+如果 GHCR 包是私有的，服务器上需要先做一次 `docker login ghcr.io`，使用带 `read:packages` 权限的 token。
+
+`/opt/services/zrowatch/.env` 可以直接参考 `deploy/.env.example`。
 
 访问地址：
 
