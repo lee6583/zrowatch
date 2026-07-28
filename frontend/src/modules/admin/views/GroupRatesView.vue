@@ -104,6 +104,11 @@ let previouslyFocusedElement: HTMLElement | null = null
 let previousBodyOverflow = ''
 let healthPollingTimer: ReturnType<typeof setInterval> | null = null
 const healthStatusFlashTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const pendingBalanceExhaustedFlashAccountIds = new Set<string>()
+const balanceSuspendedErrorKey = 'admin.connectionHealth.errors.balanceSuspended'
+
+const shouldShowPageError = (key: string | null | undefined): boolean => Boolean(key && key !== balanceSuspendedErrorKey)
+const isBalanceSuspendedError = (error: unknown): boolean => error instanceof Error && error.message === balanceSuspendedErrorKey
 
 const dialogFocusableSelector = [
   'button:not([disabled])',
@@ -387,6 +392,7 @@ const connectionBeingEdited = computed(() => connectionEditingRate.value ? realC
 const loadRealConnections = async () => {
   try {
     realConnectionsData.value = await listRealConnections()
+    flushBalanceExhaustedFlashes()
   } catch {}
 }
 
@@ -468,6 +474,18 @@ const flashHealthStatus = (rate: GroupRate) => {
     flashingHealthGroups.value = next
     healthStatusFlashTimers.delete(key)
   }, 900))
+}
+
+const flushBalanceExhaustedFlashes = () => {
+  if (pendingBalanceExhaustedFlashAccountIds.size === 0) return
+  for (const rate of rates.value) {
+    const matchedAccountIds = realConnectionsForRate(rate)
+      .map(connection => String(connection.adminAccountId))
+      .filter(accountId => pendingBalanceExhaustedFlashAccountIds.has(accountId))
+    if (matchedAccountIds.length === 0) continue
+    flashHealthStatus(rate)
+    for (const accountId of matchedAccountIds) pendingBalanceExhaustedFlashAccountIds.delete(accountId)
+  }
 }
 
 const healthBarClasses = (event: GroupRateProbeCycle | null, stale: boolean, balanceSuspended = false): string => {
@@ -701,7 +719,12 @@ const probeHealthRate = async (rate: GroupRate) => {
     for (const account of response.dispatchAccounts) mergeDispatchAccount(account)
     flashHealthStatus(rate)
   } catch (error) {
-    healthSummaryErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.probeFailed'
+    if (isBalanceSuspendedError(error)) {
+      await loadDispatchAccounts()
+      flashHealthStatus(rate)
+    } else {
+      healthSummaryErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.probeFailed'
+    }
   } finally {
     const probing = new Set(probingHealthGroups.value)
     probing.delete(key)
@@ -1040,15 +1063,22 @@ const loadDispatchAccounts = async () => {
   dispatchErrorKey.value = ''
   try {
     const states = await getBoundDispatchAccounts()
+    const previousAccounts = dispatchAccountsById.value
     const accounts = new Map<string, BoundDispatchAccountState>()
     const drafts = new Map<string, string>()
     for (const account of states) {
       const accountId = String(account.id)
       accounts.set(accountId, account)
       drafts.set(accountId, String(normalizedDispatchPriority(account)))
+      if (isBalanceSuspendedAccount(account) && !isBalanceSuspendedAccount(previousAccounts.get(accountId))) {
+        pendingBalanceExhaustedFlashAccountIds.add(accountId)
+      } else if (!isBalanceSuspendedAccount(account)) {
+        pendingBalanceExhaustedFlashAccountIds.delete(accountId)
+      }
     }
     dispatchAccountsById.value = accounts
     priorityDraftByAccountId.value = drafts
+    flushBalanceExhaustedFlashes()
   } catch {
     dispatchAccountsById.value = new Map()
     priorityDraftByAccountId.value = new Map()
@@ -1187,7 +1217,12 @@ const toggleDispatch = async (rate: GroupRate) => {
       rolledBackAccounts.set(accountId, previousAccount)
       dispatchAccountsById.value = rolledBackAccounts
     }
-    dispatchErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.dispatch.updateFailed'
+    if (isBalanceSuspendedError(error)) {
+      await loadDispatchAccounts()
+      flashHealthStatus(rate)
+    } else {
+      dispatchErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.dispatch.updateFailed'
+    }
   } finally {
     const loadingIds = new Set(dispatchLoadingAccountIds.value)
     loadingIds.delete(accountId)
@@ -1247,7 +1282,12 @@ const commitPriority = async (rate: GroupRate) => {
       dispatchAccountsById.value = rolledBackAccounts
     }
     setPriorityDraft(accountId, String(currentPriority))
-    priorityErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.priority.updateFailed'
+    if (isBalanceSuspendedError(error)) {
+      await loadDispatchAccounts()
+      flashHealthStatus(rate)
+    } else {
+      priorityErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.priority.updateFailed'
+    }
   } finally {
     const loadingIds = new Set(priorityLoadingAccountIds.value)
     loadingIds.delete(accountId)
@@ -1591,22 +1631,22 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
       </div>
     </div>
 
-    <div v-if="errorKey" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
+    <div v-if="shouldShowPageError(errorKey)" class="flex items-start gap-3 rounded-2xl border border-warning/20 bg-warning/10 p-4 text-sm text-warning shrink-0">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
-      <span>{{ t(errorKey) }}</span>
+      <span>{{ t(errorKey ?? '') }}</span>
     </div>
 
-    <div v-if="dispatchErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
+    <div v-if="shouldShowPageError(dispatchErrorKey)" class="flex shrink-0 items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
       <span>{{ t(dispatchErrorKey) }}</span>
     </div>
 
-    <div v-if="priorityErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
+    <div v-if="shouldShowPageError(priorityErrorKey)" class="flex shrink-0 items-start gap-3 rounded-lg border border-destructive/20 bg-destructive/10 p-4 text-sm text-destructive">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
       <span>{{ t(priorityErrorKey) }}</span>
     </div>
 
-    <div v-if="statusFilter === 'mapped' && healthSummaryErrorKey" class="flex shrink-0 items-start gap-3 rounded-lg border border-warning/20 bg-warning/10 p-4 text-sm text-warning">
+    <div v-if="statusFilter === 'mapped' && shouldShowPageError(healthSummaryErrorKey)" class="flex shrink-0 items-start gap-3 rounded-lg border border-warning/20 bg-warning/10 p-4 text-sm text-warning">
       <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
       <span>{{ t(healthSummaryErrorKey) }}</span>
     </div>
