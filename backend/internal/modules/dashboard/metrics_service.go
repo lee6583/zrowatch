@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"transithub/backend/internal/modules/upstream"
+	apptimezone "transithub/backend/internal/timezone"
 )
 
 // UpstreamLister 抽象上游站点列表读取，由 upstream.Service 实现。
@@ -121,7 +122,7 @@ func (s *MetricsService) LiveMetrics(ctx context.Context, userID string) (Metric
 
 	// 并行获取四项独立数据：今日盈利、站点余额、分组数量、上游指标。
 	// 各 goroutine 出错只记日志、降级为零值，不阻塞整体返回。
-	today := time.Now().Format("2006-01-02")
+	today := apptimezone.Today()
 	var (
 		todayProfit     float64
 		siteBalance     float64
@@ -247,11 +248,7 @@ func (s *MetricsService) Trends(ctx context.Context, userID string, days int) (T
 // 确保即使用户当天未访问仪表盘，趋势图也不会出现空缺。
 func (s *MetricsService) StartScheduler(ctx context.Context) {
 	go func() {
-		loc, err := time.LoadLocation("Asia/Shanghai")
-		if err != nil {
-			log.Printf("dashboard scheduler: failed to load Asia/Shanghai timezone, using UTC: %v", err)
-			loc = time.UTC
-		}
+		loc := apptimezone.Location()
 
 		for {
 			now := time.Now().In(loc)
@@ -289,16 +286,13 @@ func (s *MetricsService) snapshotAll(ctx context.Context) {
 		return
 	}
 
-	loc, _ := time.LoadLocation("Asia/Shanghai")
-	if loc == nil {
-		loc = time.UTC
-	}
+	loc := apptimezone.Location()
 	yesterday := time.Now().In(loc).AddDate(0, 0, -1).Format("2006-01-02")
 
 	for _, ref := range refs {
 		userID := ref.UserID
 		adminAccountID := ref.AdminAccountID
-		yesterdayDate, _ := time.Parse("2006-01-02", yesterday)
+		yesterdayDate, _ := apptimezone.ParseDate(yesterday)
 		exists, err := s.metricsRepo.Exists(ctx, userID, adminAccountID, yesterdayDate)
 		if err != nil {
 			log.Printf("dashboard scheduler: check exists failed user_id=%s err=%v", userID, err)
@@ -367,7 +361,7 @@ func (s *MetricsService) snapshotAll(ctx context.Context) {
 // upsertSnapshot 将指标写入 dashboard_daily_stats 表。
 // 冲突时更新已有行，保证同一天内多次调用始终保留最新数据。
 func (s *MetricsService) upsertSnapshot(ctx context.Context, userID, adminAccountID, date string, metrics MetricsResponse) {
-	parsedDate, err := time.Parse("2006-01-02", date)
+	parsedDate, err := apptimezone.ParseDate(date)
 	if err != nil {
 		log.Printf("dashboard metrics: invalid date %s: %v", date, err)
 		return
@@ -491,7 +485,7 @@ func (s *MetricsService) GroupUsageToday(ctx context.Context, userID string) (Gr
 	}
 
 	return GroupUsageTodayResponse{
-		Date:   time.Now().Format("2006-01-02"),
+		Date:   apptimezone.Today(),
 		Total:  total,
 		Groups: items,
 	}, nil
@@ -537,7 +531,7 @@ func (s *MetricsService) UpstreamKeyUsageToday(ctx context.Context, userID strin
 	}
 
 	return UpstreamKeyUsageTodayResponse{
-		Date:        time.Now().Format("2006-01-02"),
+		Date:        apptimezone.Today(),
 		Total:       total,
 		Keys:        responseItems,
 		FailedSites: failedSites,

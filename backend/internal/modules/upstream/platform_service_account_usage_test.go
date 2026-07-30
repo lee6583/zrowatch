@@ -26,6 +26,9 @@ func TestFetchSub2APIAdminAccountUsageStats(t *testing.T) {
 		if query.Get("timezone") != "Asia/Shanghai" {
 			t.Errorf("timezone = %q, want Asia/Shanghai", query.Get("timezone"))
 		}
+		if query.Get("nocache") != "1" {
+			t.Errorf("nocache = %q, want 1", query.Get("nocache"))
+		}
 		if got := r.Header.Get("Authorization"); got != "Bearer test-token" {
 			t.Errorf("Authorization = %q, want Bearer test-token", got)
 		}

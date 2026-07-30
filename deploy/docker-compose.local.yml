@@ -16,6 +16,7 @@ services:
       PORT: "10621"
       DATABASE_URL: postgres://transithub:lyfzsx2005@postgres:5432/transithub?sslmode=disable
       REDIS_URL: redis://redis:6379/0
+      TZ: Asia/Shanghai
       ADMIN_EMAIL: 3496712906@qq.com
       ADMIN_PASSWORD: lyfzsx2005
       ALLOW_PUBLIC_REGISTER: "false"

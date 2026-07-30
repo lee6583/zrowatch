@@ -103,6 +103,7 @@ const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRat
 let previouslyFocusedElement: HTMLElement | null = null
 let previousBodyOverflow = ''
 let healthPollingTimer: ReturnType<typeof setInterval> | null = null
+let isDispatchAccountsRefreshInFlight = false
 const healthStatusFlashTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const pendingBalanceExhaustedFlashAccountIds = new Set<string>()
 const balanceSuspendedErrorKey = 'admin.connectionHealth.errors.balanceSuspended'
@@ -547,9 +548,9 @@ const stopHealthPolling = () => {
 const startHealthPolling = () => {
   stopHealthPolling()
   if (statusFilter.value !== 'mapped' || document.visibilityState === 'hidden') return
-  void Promise.all([loadHealthSummaries(true), loadRealConnections()])
+  void Promise.all([loadHealthSummaries(true), loadRealConnections(), loadDispatchAccounts(false)])
   healthPollingTimer = setInterval(() => {
-    void Promise.all([loadHealthSummaries(), loadRealConnections()])
+    void Promise.all([loadHealthSummaries(), loadRealConnections(), loadDispatchAccounts(false)])
   }, 10_000)
 }
 
@@ -1058,21 +1059,33 @@ const setConnectMode = async (mode: 'real' | 'bind') => {
   }
 }
 
-const loadDispatchAccounts = async () => {
-  isLoadingDispatchAccounts.value = true
+const loadDispatchAccounts = async (showLoading = true) => {
+  if (isDispatchAccountsRefreshInFlight) return
+  isDispatchAccountsRefreshInFlight = true
+  if (showLoading) isLoadingDispatchAccounts.value = true
   dispatchErrorKey.value = ''
   try {
     const states = await getBoundDispatchAccounts()
     const previousAccounts = dispatchAccountsById.value
+    const previousDrafts = priorityDraftByAccountId.value
     const accounts = new Map<string, BoundDispatchAccountState>()
     const drafts = new Map<string, string>()
     for (const account of states) {
       const accountId = String(account.id)
-      accounts.set(accountId, account)
-      drafts.set(accountId, String(normalizedDispatchPriority(account)))
-      if (isBalanceSuspendedAccount(account) && !isBalanceSuspendedAccount(previousAccounts.get(accountId))) {
+      const currentAccount = dispatchAccountsById.value.get(accountId)
+      const isLocallyUpdating = dispatchLoadingAccountIds.value.has(accountId) || priorityLoadingAccountIds.value.has(accountId)
+      const resolvedAccount = isLocallyUpdating && currentAccount ? currentAccount : account
+      accounts.set(accountId, resolvedAccount)
+
+      const previousAccount = previousAccounts.get(accountId)
+      const previousDraft = previousDrafts.get(accountId)
+      const hasUnsavedDraft = !showLoading && previousDraft != null && previousAccount != null &&
+        previousDraft.trim() !== String(normalizedDispatchPriority(previousAccount))
+      drafts.set(accountId, hasUnsavedDraft ? previousDraft : String(normalizedDispatchPriority(resolvedAccount)))
+
+      if (isBalanceSuspendedAccount(resolvedAccount) && !isBalanceSuspendedAccount(previousAccount)) {
         pendingBalanceExhaustedFlashAccountIds.add(accountId)
-      } else if (!isBalanceSuspendedAccount(account)) {
+      } else if (!isBalanceSuspendedAccount(resolvedAccount)) {
         pendingBalanceExhaustedFlashAccountIds.delete(accountId)
       }
     }
@@ -1080,11 +1093,14 @@ const loadDispatchAccounts = async () => {
     priorityDraftByAccountId.value = drafts
     flushBalanceExhaustedFlashes()
   } catch {
-    dispatchAccountsById.value = new Map()
-    priorityDraftByAccountId.value = new Map()
+    if (showLoading) {
+      dispatchAccountsById.value = new Map()
+      priorityDraftByAccountId.value = new Map()
+    }
     dispatchErrorKey.value = 'admin.groupRates.dispatch.loadFailed'
   } finally {
-    isLoadingDispatchAccounts.value = false
+    isDispatchAccountsRefreshInFlight = false
+    if (showLoading) isLoadingDispatchAccounts.value = false
   }
 }
 

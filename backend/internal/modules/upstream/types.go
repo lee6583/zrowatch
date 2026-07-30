@@ -74,6 +74,7 @@ type GroupInfo struct {
 	ID                string   `json:"id"`
 	Name              string   `json:"name"`
 	Platform          *string  `json:"platform"`
+	ClaudeCodeOnly    bool     `json:"claudeCodeOnly"`
 	Multiplier        *float64 `json:"multiplier"`
 	MultiplierDisplay string   `json:"multiplierDisplay"`
 	MultiplierMode    string   `json:"multiplierMode,omitempty"`

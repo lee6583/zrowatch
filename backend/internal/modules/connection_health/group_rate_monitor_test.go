@@ -563,6 +563,50 @@ func TestResolveGroupRateMonitorConfigPrecedence(t *testing.T) {
 	}
 }
 
+func TestResolveGroupRateMonitorConfigRejectsClearlyMismatchedAnthropicModel(t *testing.T) {
+	settings := GroupRateMonitorSettings{Enabled: true, ProbeIntervalSeconds: 30, FailureThreshold: 2, DefaultModel: "gpt-5.5"}
+	group := groupRateMonitorGroup{GroupType: "anthropic"}
+
+	resolved := resolveGroupRateMonitorConfig(settings, nil, nil, group)
+	if resolved.Model != "" {
+		t.Fatalf("anthropic group must not probe with an inherited OpenAI model: %+v", resolved)
+	}
+
+	settings.DefaultModel = "claude-sonnet-4-5"
+	resolved = resolveGroupRateMonitorConfig(settings, nil, nil, group)
+	if resolved.Model != "claude-sonnet-4-5" {
+		t.Fatalf("anthropic model should remain configured: %+v", resolved)
+	}
+}
+
+func TestGroupRateUpstreamProbeRequestSelectsProtocolFromGroupCapability(t *testing.T) {
+	service := &Service{sites: groupRateSiteLookup{
+		"site-1": {
+			ID: "site-1", BaseURL: "https://gateway.example/v1", Platform: upstream.PlatformSub2API,
+			Metrics: upstream.Metrics{Groups: []upstream.GroupInfo{
+				{ID: "group-native", Name: "Claude native", ClaudeCodeOnly: true},
+				{ID: "group-compatible", Name: "Claude compatible"},
+			}},
+		},
+	}}
+
+	_, reason := service.groupRateUpstreamProbeRequest(context.Background(), groupRateMonitorGroup{
+		SiteID: "site-1", GroupID: "group-native", GroupName: "Claude native", GroupType: "anthropic",
+		Accounts: []my_sites.RealConnection{{UpstreamKey: "key"}},
+	}, "claude-sonnet-4-5")
+	if reason != upstream.ReasonClaudeCodeOnly {
+		t.Fatalf("claude_code_only group must be unavailable instead of failing a generic probe: reason=%q", reason)
+	}
+
+	compatible, reason := service.groupRateUpstreamProbeRequest(context.Background(), groupRateMonitorGroup{
+		SiteID: "site-1", GroupID: "group-compatible", GroupName: "Claude compatible", GroupType: "anthropic",
+		Accounts: []my_sites.RealConnection{{UpstreamKey: "key"}},
+	}, "claude-sonnet-4-5")
+	if reason != "" || compatible.ProviderFamily != ProviderAnthropic {
+		t.Fatalf("normal anthropic group should retain gateway compatibility: request=%+v reason=%q", compatible, reason)
+	}
+}
+
 func TestResolveGroupRateMonitorConfigUsesIndependentGroupSwitch(t *testing.T) {
 	settings := GroupRateMonitorSettings{Enabled: true, ProbeIntervalSeconds: 30, FailureThreshold: 2, DefaultModel: "global-model"}
 	group := groupRateMonitorGroup{SiteID: "site-1", GroupID: "group-1", GroupName: "福利", GroupKey: "id:group-1"}

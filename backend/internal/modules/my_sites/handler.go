@@ -222,7 +222,7 @@ func (h *Handler) listRealConnections(w http.ResponseWriter, r *http.Request) {
 		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
 		return
 	}
-	connections, err := h.service.ListRealConnections(r.Context(), userID)
+	connections, err := h.service.ListRealConnectionsReconciled(r.Context(), userID)
 	if err != nil {
 		writeError(w, err)
 		return

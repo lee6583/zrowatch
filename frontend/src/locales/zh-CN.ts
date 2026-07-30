@@ -1574,6 +1574,7 @@ export default {
           model_unavailable: '模型不可用',
           export_unavailable: '账号导出接口不可用',
           credentials_redacted: '账号凭据已脱敏',
+          claude_code_only: '仅限 Claude Code 客户端，通用探活不会自动停用该分组',
           balance_suspended: '耗尽'
         },
         probe: {
@@ -1614,7 +1615,7 @@ export default {
           saved: '设置已保存。已恢复 {restored} 个账户，{pending} 个待重试，{conflict} 个保留人工状态。'
         },
         errors: {
-          modelRequired: '启用自动探活前必须填写默认模型。',
+          modelRequired: '请配置与分组类型匹配的探活模型；Anthropic 分组不能使用 GPT 或 Gemini 模型。',
           disabled: '尚未配置探活模型，请先完成探活设置。',
           loadFailed: '健康状态加载失败，请稍后重试。',
           settingsLoadFailed: '探活设置加载失败，请稍后重试。',

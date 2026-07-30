@@ -30,6 +30,7 @@ const (
 	ReasonModelUnavailable           = "model_unavailable"
 	ReasonExportUnavailable          = "export_unavailable"
 	ReasonCredentialsRedacted        = "credentials_redacted"
+	ReasonClaudeCodeOnly             = "claude_code_only"
 )
 
 // ProbeCredentialError 是凭据解析失败的类型化错误：只携带脱敏后的 reason 枚举，

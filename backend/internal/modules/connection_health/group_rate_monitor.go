@@ -417,7 +417,36 @@ func resolveGroupRateMonitorConfig(settings GroupRateMonitorSettings, typeDefaul
 	if result.FailureThreshold < 1 || result.FailureThreshold > groupRateMonitorMaxFailures {
 		result.FailureThreshold = groupRateMonitorDefaultFailures
 	}
+	if !groupRateProbeModelCompatible(group.GroupType, result.Model) {
+		result.Model = ""
+	}
 	return result
+}
+
+func groupRateProviderFamily(groupType string) string {
+	switch strings.ToLower(strings.TrimSpace(groupType)) {
+	case "anthropic", "claude":
+		return ProviderAnthropic
+	case "gemini", "google":
+		return ProviderGemini
+	case "openai":
+		return ProviderOpenAI
+	default:
+		return ProviderCustom
+	}
+}
+
+func groupRateProbeModelCompatible(groupType, model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if model == "" || groupRateProviderFamily(groupType) != ProviderAnthropic {
+		return true
+	}
+	return !strings.HasPrefix(model, "gpt-") &&
+		!strings.HasPrefix(model, "chatgpt-") &&
+		!strings.HasPrefix(model, "gemini-") &&
+		!strings.HasPrefix(model, "o1") &&
+		!strings.HasPrefix(model, "o3") &&
+		!strings.HasPrefix(model, "o4")
 }
 
 func (s *Service) buildGroupRateMonitorSettingsView(_ context.Context, settings GroupRateMonitorSettings, typeDefaults []GroupRateMonitorTypeDefault, overrides []GroupRateMonitorOverride, groups []groupRateMonitorGroup) GroupRateMonitorSettingsView {
@@ -432,9 +461,13 @@ func (s *Service) buildGroupRateMonitorSettingsView(_ context.Context, settings 
 	for groupType := range typeNames {
 		item, ok := typeConfigs[groupType]
 		if !ok {
+			model := strings.TrimSpace(settings.DefaultModel)
+			if !groupRateProbeModelCompatible(groupType, model) {
+				model = ""
+			}
 			item = GroupRateMonitorTypeDefault{GroupType: groupType, Enabled: settings.Enabled,
 				ProbeIntervalSeconds: settings.ProbeIntervalSeconds, FailureThreshold: settings.FailureThreshold,
-				Model: strings.TrimSpace(settings.DefaultModel)}
+				Model: model}
 		}
 		typeViews = append(typeViews, item)
 	}
@@ -513,6 +546,9 @@ func (s *Service) SaveGroupRateMonitorSettings(ctx context.Context, userID strin
 		if _, valid := validTypes[groupType]; !valid {
 			continue
 		}
+		if !groupRateProbeModelCompatible(groupType, item.Model) {
+			return GroupRateMonitorSettingsView{}, requestError(ErrorGroupRateMonitorModelRequired)
+		}
 		if _, duplicate := seenTypes[groupType]; duplicate {
 			return GroupRateMonitorSettingsView{}, requestError(ErrorRequest)
 		}
@@ -529,6 +565,9 @@ func (s *Service) SaveGroupRateMonitorSettings(ctx context.Context, userID strin
 		group, valid := validGroups[key]
 		if !valid {
 			continue
+		}
+		if !groupRateProbeModelCompatible(group.GroupType, item.Model) {
+			return GroupRateMonitorSettingsView{}, requestError(ErrorGroupRateMonitorModelRequired)
 		}
 		if _, duplicate := seenOverrides[key]; duplicate {
 			return GroupRateMonitorSettingsView{}, requestError(ErrorRequest)
@@ -831,7 +870,29 @@ func (s *Service) groupRateUpstreamProbeRequest(ctx context.Context, group group
 	if strings.TrimSpace(key) == "" {
 		return ProbeRequest{}, upstream.ReasonCredentialUnavailable
 	}
-	return ProbeRequest{BaseURL: site.BaseURL, UpstreamKey: key, ModelName: model, MaxTokens: 1}, ""
+	if groupRateProviderFamily(group.GroupType) == ProviderAnthropic && groupRateGroupClaudeCodeOnly(site.Metrics.Groups, group) {
+		return ProbeRequest{}, upstream.ReasonClaudeCodeOnly
+	}
+	return ProbeRequest{
+		BaseURL: site.BaseURL, UpstreamKey: key, ProviderFamily: groupRateProviderFamily(group.GroupType),
+		ModelName: model, MaxTokens: 1,
+	}, ""
+}
+
+func groupRateGroupClaudeCodeOnly(groups []upstream.GroupInfo, target groupRateMonitorGroup) bool {
+	targetID := strings.TrimSpace(target.GroupID)
+	targetName := strings.TrimSpace(target.GroupName)
+	for _, group := range groups {
+		if targetID != "" && strings.TrimSpace(group.ID) == targetID {
+			return group.ClaudeCodeOnly
+		}
+	}
+	for _, group := range groups {
+		if targetName != "" && strings.TrimSpace(group.Name) == targetName {
+			return group.ClaudeCodeOnly
+		}
+	}
+	return false
 }
 
 func groupRateProbeStatus(detail GroupRateProbeTargetResult, failureThreshold int) string {

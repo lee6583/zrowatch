@@ -19,6 +19,9 @@ func TestFetchAdminGroupDailyStats_DispatchesByPlatform(t *testing.T) {
 					{"id": 2, "name": "vip"},
 				}})
 			case "/api/v1/admin/groups/usage-summary":
+				if got := r.URL.Query().Get("timezone"); got != "Asia/Shanghai" {
+					t.Fatalf("timezone = %q, want Asia/Shanghai", got)
+				}
 				writeJSON(w, map[string]any{"data": []map[string]any{
 					{"group_id": 1, "today_actual_cost": 12.5},
 					{"group_id": 2, "today_cost": 7.25},

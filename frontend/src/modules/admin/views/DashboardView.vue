@@ -225,6 +225,7 @@ const adminExpiry = computed(
 const lastUpdatedLabel = computed(() => {
   if (lastUpdatedAt.value == null) return t('admin.dashboard.dataStatus.waiting')
   return new Intl.DateTimeFormat(locale.value, {
+    timeZone: 'Asia/Shanghai',
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',

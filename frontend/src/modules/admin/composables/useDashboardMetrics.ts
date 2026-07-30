@@ -18,6 +18,8 @@ import {
   type DashboardTrendsResponse,
 } from '../api/dashboardAdmin'
 
+const dashboardTimeZone = 'Asia/Shanghai'
+
 const METRIC_CONFIGS: { key: DashboardMetricKey; color: DashboardColorToken }[] = [
   { key: 'todayProfit', color: 'primary' },
   { key: 'siteBalance', color: 'accent' },
@@ -32,8 +34,11 @@ function dateLabel(dateStr: string): string {
 }
 
 function todayLabel(): string {
-  const now = new Date()
-  return `${now.getMonth() + 1}/${now.getDate()}`
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: dashboardTimeZone,
+    month: 'numeric',
+    day: 'numeric',
+  }).format(new Date())
 }
 
 function buildMetricData(

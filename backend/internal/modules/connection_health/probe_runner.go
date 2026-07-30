@@ -12,8 +12,12 @@ import (
 	"time"
 )
 
-// ProbeTimeout 是单次真实探活请求的超时时间，任务书要求默认 10s。
-const ProbeTimeout = 10 * time.Second
+// ProbeTimeout 是普通网关探活的默认超时时间。Claude 模型首包通常更慢，使用独立阈值
+// 避免把仍在正常生成的请求误判为网络故障。
+const (
+	ProbeTimeout          = 10 * time.Second
+	AnthropicProbeTimeout = 30 * time.Second
+)
 
 const defaultProbePrompt = "hi"
 
@@ -29,13 +33,13 @@ type ProbeRequest struct {
 }
 
 // RealProbeRunner 按 provider family 构造最小请求，对上游 AI 端点发起一次性轻量调用。
-// 不经过任何现有请求转发路径，独立的 http.Client，超时 10s。
+// 不经过任何现有请求转发路径，并按 provider family 使用独立超时。
 type RealProbeRunner struct {
 	client *http.Client
 }
 
 func NewRealProbeRunner() *RealProbeRunner {
-	return &RealProbeRunner{client: &http.Client{Timeout: ProbeTimeout}}
+	return &RealProbeRunner{client: &http.Client{}}
 }
 
 // Probe 发起一次真实轻量探活，返回分类后的结果。err 只用于调用方感知调用本身是否被 ctx 取消，
@@ -50,7 +54,9 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 		prompt = defaultProbePrompt
 	}
 
-	httpReq, buildErr := buildProbeRequest(ctx, req, prompt, maxTokens)
+	probeCtx, cancel := context.WithTimeout(ctx, probeTimeoutForProvider(req.ProviderFamily))
+	defer cancel()
+	httpReq, buildErr := buildProbeRequest(probeCtx, req, prompt, maxTokens)
 	if buildErr != nil {
 		return ProbeOutcome{Result: ResultInvalidResponse, Detail: redact(buildErr.Error(), req.UpstreamKey)}
 	}
@@ -67,6 +73,13 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 	return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
 }
 
+func probeTimeoutForProvider(providerFamily string) time.Duration {
+	if providerFamily == ProviderAnthropic {
+		return AnthropicProbeTimeout
+	}
+	return ProbeTimeout
+}
+
 // buildProbeRequest 统一走 OpenAI 兼容的 /v1/chat/completions 网关端点。
 //
 // 背景（对应整改任务书第 4 项）：real_connections.upstream_key 和
@@ -76,10 +89,10 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 // 内部按 model 名称路由到实际 provider。如果对这些网关直接打 Gemini
 // generateContent / Anthropic messages 原生端点，网关大概率不认识这些路径，会导致
 // Gemini/Anthropic 模型被系统性误判为失败，进而错误触发自动降级。
-// providerFamily 目前只用于在 ModelName 为空时选择一个合理的默认模型名做探活，
-// 不再影响实际请求的 endpoint/鉴权方式。
+// providerFamily 只用于在 ModelName 为空时选择默认模型。已对接页面持有的是网关 key，
+// 因此普通 Anthropic 分组也继续走网关的 OpenAI 兼容入口，由网关完成协议转换。
 func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, maxTokens int) (*http.Request, error) {
-	baseURL := strings.TrimRight(req.BaseURL, "/")
+	baseURL := normalizeProbeBaseURL(req.BaseURL)
 	model := req.ModelName
 	if model == "" {
 		model = defaultModelForProvider(req.ProviderFamily)
@@ -93,6 +106,20 @@ func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, max
 	}
 	headers := map[string]string{"Authorization": "Bearer " + req.UpstreamKey}
 	return newJSONRequest(ctx, http.MethodPost, endpoint, payload, headers)
+}
+
+func normalizeProbeBaseURL(value string) string {
+	baseURL := strings.TrimRight(strings.TrimSpace(value), "/")
+	for _, suffix := range []string{"/v1/chat/completions", "/chat/completions", "/v1/messages", "/messages"} {
+		if strings.HasSuffix(strings.ToLower(baseURL), suffix) {
+			baseURL = strings.TrimRight(baseURL[:len(baseURL)-len(suffix)], "/")
+			break
+		}
+	}
+	if strings.HasSuffix(strings.ToLower(baseURL), "/v1") {
+		baseURL = strings.TrimRight(baseURL[:len(baseURL)-len("/v1")], "/")
+	}
+	return baseURL
 }
 
 func defaultModelForProvider(providerFamily string) string {

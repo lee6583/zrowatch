@@ -45,6 +45,7 @@ export function formatCny(value: number | null | undefined): string {
 export function formatDateTime(ms: number | null | undefined, locale = 'zh-CN'): string | null {
   if (ms == null || !Number.isFinite(ms)) return null
   return new Intl.DateTimeFormat(locale, {
+    timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',

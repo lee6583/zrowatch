@@ -122,6 +122,9 @@ func TestFetchSub2APIAdminUsageStatsUsesAdminAPIKey(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Fatalf("unexpected Authorization header: %q", got)
 		}
+		if got := r.URL.Query().Get("timezone"); got != "Asia/Shanghai" {
+			t.Fatalf("timezone = %q, want Asia/Shanghai", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":{"total_actual_cost":12.5}}`))
 	}))

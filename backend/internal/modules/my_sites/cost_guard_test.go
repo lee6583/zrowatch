@@ -12,8 +12,11 @@ import (
 )
 
 type costGuardTestConnRepo struct {
-	connections map[string]RealConnection
-	pauses      map[string]CostGuardPause
+	connections      map[string]RealConnection
+	pauses           map[string]CostGuardPause
+	updateCalls      int
+	lastAddedNames   []string
+	lastRemovedNames []string
 }
 
 func newCostGuardTestConnRepo(connections ...RealConnection) *costGuardTestConnRepo {
@@ -62,11 +65,14 @@ func (r *costGuardTestConnRepo) DeleteRealConnection(_ context.Context, id, user
 	return nil
 }
 
-func (r *costGuardTestConnRepo) UpdateRealConnectionGroups(_ context.Context, conn RealConnection, groupIDs, groupNames, _, _ []string) error {
+func (r *costGuardTestConnRepo) UpdateRealConnectionGroups(_ context.Context, conn RealConnection, groupIDs, groupNames, addedNames, removedNames []string) error {
 	stored := conn
 	stored.OwnGroupIDs = append([]string(nil), groupIDs...)
 	stored.OwnGroupNames = append([]string(nil), groupNames...)
 	r.connections[conn.ID] = stored
+	r.updateCalls++
+	r.lastAddedNames = append([]string(nil), addedNames...)
+	r.lastRemovedNames = append([]string(nil), removedNames...)
 	return nil
 }
 

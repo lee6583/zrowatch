@@ -437,3 +437,41 @@ func parseGroupIDList(record map[string]any) []string {
 	}
 	return nil
 }
+
+// parseSub2APIAccountGroupIDs distinguishes an explicitly empty group list from
+// an older account response that does not expose group membership at all.
+func parseSub2APIAccountGroupIDs(record map[string]any) ([]string, bool) {
+	for _, key := range []string{"group_ids", "groupIds"} {
+		value, ok := record[key]
+		if !ok {
+			continue
+		}
+		switch value.(type) {
+		case []any, string:
+			return parseGroupIDList(record), true
+		default:
+			return nil, false
+		}
+	}
+
+	value, ok := record["groups"]
+	if !ok {
+		return nil, false
+	}
+	groups, ok := value.([]any)
+	if !ok {
+		return nil, false
+	}
+	ids := make([]string, 0, len(groups))
+	for _, item := range groups {
+		record, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		id := groupID2(record)
+		if id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, true
+}

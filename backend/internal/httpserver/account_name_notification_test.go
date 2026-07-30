@@ -31,6 +31,35 @@ func TestFormatBalanceLifecycleIncludesCountsAndAccountIDs(t *testing.T) {
 	}
 }
 
+func TestFormatBalanceLifecycleIncludesCompleteProfitSummary(t *testing.T) {
+	message := formatBalanceLifecycle("site", balance_control.Result{
+		Transition: "paused", BalanceCNY: 0, Threshold: 10,
+		Profit: &balance_control.ProfitReport{
+			CycleFound: true, Complete: true, RechargeAmountCNY: 150,
+			DownstreamIncomeCNY: 190, ProfitCNY: 40,
+			Groups: []balance_control.ProfitGroupIncome{
+				{GroupName: "codex_plus-福利", Amount: 120},
+				{GroupName: "claude-福利", Amount: 70},
+			},
+		},
+	}, "自定义余额提醒")
+	for _, expected := range []string{"自定义余额提醒", "【本充值周期盈亏】", "充值合计：¥150.00", "下游用户扣费：¥190.00", "总盈利：¥40.00", "codex_plus-福利：¥120.00", "claude-福利：¥70.00"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("expected %q in balance message, got %q", expected, message)
+		}
+	}
+}
+
+func TestFormatBalanceProfitSummaryDoesNotClaimIncompleteProfit(t *testing.T) {
+	message := formatBalanceProfitSummary(&balance_control.ProfitReport{
+		CycleFound: true, RechargeAmountCNY: 100, DownstreamIncomeCNY: 20,
+		SuccessfulAccounts: 1, FailedAccounts: 1,
+	})
+	if !strings.Contains(message, "统计不完整") || strings.Contains(message, "总亏损：") || strings.Contains(message, "总盈利：") {
+		t.Fatalf("incomplete report claimed a definitive result: %q", message)
+	}
+}
+
 func TestFormatAccountRenameSummaryIgnoresOtherGroups(t *testing.T) {
 	message := formatAccountRenameSummary("其他分组", []my_sites.AccountRenameResult{
 		{GroupName: "王中王", Status: "failed"},

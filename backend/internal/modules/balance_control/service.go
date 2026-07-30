@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"strings"
+	"sync"
 
 	"transithub/backend/internal/modules/my_sites"
 	"transithub/backend/internal/modules/settings"
@@ -11,10 +12,11 @@ import (
 )
 
 type Service struct {
-	repository pauseRepository
-	upstream   siteBalanceController
-	mySites    connectionProvider
-	platform   accountStateController
+	repository  pauseRepository
+	upstream    siteBalanceController
+	mySites     connectionProvider
+	platform    accountStateController
+	profitLocks sync.Map
 }
 
 type pauseRepository interface {
@@ -25,6 +27,12 @@ type pauseRepository interface {
 	ListForSite(ctx context.Context, userID, adminAccountID, siteID string, appliedOnly bool) ([]PauseRecord, error)
 	Delete(ctx context.Context, userID, adminAccountID, siteID, remoteAccountID string) error
 	IsAccountPausedForWorkspace(ctx context.Context, userID, adminAccountID, remoteAccountID string) (bool, error)
+	GetProfitCycle(ctx context.Context, userID, adminAccountID, siteID string) (*ProfitCycle, error)
+	StartProfitCycle(ctx context.Context, cycle ProfitCycle) error
+	AddProfitCycleRecharge(ctx context.Context, userID, adminAccountID, siteID string, amount float64) error
+	ListProfitCycleAccounts(ctx context.Context, userID, adminAccountID, siteID string) ([]ProfitCycleAccount, error)
+	UpsertProfitCycleAccount(ctx context.Context, account ProfitCycleAccount) error
+	FinalizeProfitCycle(ctx context.Context, cycle ProfitCycle, accounts []ProfitCycleAccount) error
 }
 
 type siteBalanceController interface {
@@ -40,6 +48,7 @@ type connectionProvider interface {
 type accountStateController interface {
 	GetSub2APIAdminAccountState(session upstream.Session, accountID string) (upstream.Sub2APIAdminAccountState, error)
 	UpdateSub2APIAdminAccountState(session upstream.Session, accountID string, status *string, schedulable *bool) error
+	FetchSub2APIAdminAccountUsageStats(session upstream.Session, accountID, startDate, endDate string) (float64, error)
 }
 
 type AccountAction struct {
@@ -60,6 +69,7 @@ type Result struct {
 	Skipped         []AccountAction
 	Failed          []AccountAction
 	PendingRestores int
+	Profit          *ProfitReport
 }
 
 func NewService(repository *Repository, upstreamService *upstream.Service, mySitesService *my_sites.Service, platform *upstream.PlatformService) *Service {
@@ -73,11 +83,14 @@ func (s *Service) EnsureSchema(ctx context.Context) error {
 // Reconcile evaluates a successfully fetched balance and applies the durable
 // site/account protection state. Remote account failures are returned as data so
 // the caller can notify and continue the normal sync pipeline.
-func (s *Service) Reconcile(ctx context.Context, userID, adminAccountID, siteID, siteName string, strategy settings.StrategySettings, metrics upstream.Metrics) Result {
+func (s *Service) Reconcile(ctx context.Context, userID, adminAccountID, siteID, siteName string, strategy settings.StrategySettings, oldMetrics, metrics upstream.Metrics) Result {
 	result := Result{}
 	if !strategy.EnableBalanceWarning || metrics.Balance.Value == nil {
 		return result
 	}
+	lock := s.profitSiteLock(userID, adminAccountID, siteID)
+	lock.Lock()
+	defer lock.Unlock()
 
 	site, err := s.upstream.GetSite(ctx, siteID)
 	if err != nil || site == nil {
@@ -97,6 +110,7 @@ func (s *Service) Reconcile(ctx context.Context, userID, adminAccountID, siteID,
 		result.Threshold = *site.Settings.BalanceThreshold
 	}
 	result.BelowThreshold = result.BalanceCNY < result.Threshold
+	s.reconcileProfitCycle(ctx, userID, adminAccountID, siteID, siteName, rate, oldMetrics, metrics, result.BelowThreshold, site.BalanceSuspended, &result)
 
 	if result.BelowThreshold {
 		result.Transition = transitionIf(site.BalanceSuspended, "", "paused")

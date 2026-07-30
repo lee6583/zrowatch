@@ -20,6 +20,8 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"group_rate_campaign_items",
 		"group_rate_campaigns",
 		"upstream_balance_account_pauses",
+		"upstream_balance_profit_cycle_accounts",
+		"upstream_balance_profit_cycles",
 		"connection_health_group_rate_monitor_actions",
 		"connection_health_group_rate_monitor_cycles",
 		"connection_health_group_rate_monitor_states",

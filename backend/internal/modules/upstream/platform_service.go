@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	apptimezone "transithub/backend/internal/timezone"
 )
 
 // jsonUnmarshalString 将 JSON 字符串解析到目标结构。
@@ -394,8 +396,8 @@ func (s *PlatformService) FetchSub2APIGroupDailyStats(session Session, groups ..
 	if err := s.VerifySub2APIAdmin(session); err != nil {
 		return nil, err
 	}
-	today := time.Now().Format("2006-01-02")
-	statsURL := session.BaseURL + "/api/v1/admin/dashboard/groups?start_date=" + today + "&end_date=" + today
+	today := apptimezone.Today()
+	statsURL := session.BaseURL + "/api/v1/admin/dashboard/groups?start_date=" + today + "&end_date=" + today + "&timezone=Asia%2FShanghai"
 	response, err := s.httpClient.requestJSON(statsURL, adminAuthOptions(session))
 	if err != nil {
 		return nil, err
@@ -424,7 +426,8 @@ func (s *PlatformService) FetchSub2APIAdminUsageStats(session Session, startDate
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return 0, newRequestError(ErrorAuth, PlatformSub2API)
 	}
-	statsURL := session.BaseURL + "/api/v1/admin/usage/stats?start_date=" + startDate + "&end_date=" + endDate
+	statsURL := session.BaseURL + "/api/v1/admin/usage/stats?start_date=" + url.QueryEscape(startDate) +
+		"&end_date=" + url.QueryEscape(endDate) + "&timezone=Asia%2FShanghai"
 	response, err := s.httpClient.requestJSON(statsURL, adminAuthOptions(session))
 	if err != nil {
 		return 0, err
@@ -451,7 +454,8 @@ func (s *PlatformService) FetchSub2APIAdminAccountUsageStats(session Session, ac
 		return 0, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	statsURL := session.BaseURL + "/api/v1/admin/usage/stats?start_date=" + url.QueryEscape(startDate) +
-		"&end_date=" + url.QueryEscape(endDate) + "&account_id=" + url.QueryEscape(accountID) + "&timezone=Asia%2FShanghai"
+		"&end_date=" + url.QueryEscape(endDate) + "&account_id=" + url.QueryEscape(accountID) +
+		"&timezone=Asia%2FShanghai&nocache=1"
 	response, err := s.httpClient.requestJSON(statsURL, adminAuthOptions(session))
 	if err != nil {
 		return 0, err
@@ -638,11 +642,16 @@ func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) 
 		}
 		platform := firstString(item, []string{"platform"})
 		defaultRate := firstNumber(item, []string{"rate_multiplier"})
+		claudeCodeOnly := false
+		if record, ok := item.(map[string]any); ok {
+			claudeCodeOnly, _ = record["claude_code_only"].(bool)
+		}
 
 		group := GroupInfo{
 			ID:                       id,
 			Name:                     name,
 			Platform:                 platform,
+			ClaudeCodeOnly:           claudeCodeOnly,
 			Multiplier:               defaultRate,
 			MultiplierDisplay:        multiplier(defaultRate),
 			DefaultMultiplier:        defaultRate,
@@ -820,7 +829,7 @@ func (s *PlatformService) fetchSub2APIGroupUsageSummaryStats(session Session) ([
 	if len(groupNames) == 0 {
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
-	usageResponse, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/groups/usage-summary", adminAuthOptions(session))
+	usageResponse, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/admin/groups/usage-summary?timezone=Asia%2FShanghai", adminAuthOptions(session))
 	if err != nil {
 		return nil, err
 	}
@@ -864,7 +873,7 @@ func (s *PlatformService) fetchSub2APIKeyGroupDailyStats(session Session) ([]Gro
 	if len(keys) == 0 {
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
-	today := time.Now().Format("2006-01-02")
+	today := apptimezone.Today()
 	totals := map[string]float64{}
 	for _, item := range keys {
 		keyID := firstNumber(item, []string{"id"})
@@ -1011,7 +1020,7 @@ func (s *PlatformService) fetchSub2APIKeyUsageToday(session Session) ([]KeyUsage
 		return nil, nil
 	}
 
-	today := time.Now().Format("2006-01-02")
+	today := apptimezone.Today()
 	const maxKeyConcurrency = 4
 	sem := make(chan struct{}, maxKeyConcurrency)
 	var wg sync.WaitGroup
@@ -1301,9 +1310,18 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) 
 		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s err=%v", session.BaseURL, err)
 		return Metrics{}, err
 	}
-	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats", authOptions)
+	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats?timezone=Asia%2FShanghai", authOptions)
 	if err != nil {
 		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", session.BaseURL, err)
+		return Metrics{}, err
+	}
+	today := apptimezone.Today()
+	todayStats, err := s.httpClient.requestJSON(
+		session.BaseURL+"/api/v1/usage/stats?start_date="+url.QueryEscape(today)+"&end_date="+url.QueryEscape(today)+"&timezone=Asia%2FShanghai",
+		authOptions,
+	)
+	if err != nil {
+		log.Printf("[sub2api-metrics] /api/v1/usage/stats 今日消费拉取失败 base_url=%s err=%v", session.BaseURL, err)
 		return Metrics{}, err
 	}
 	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
@@ -1314,12 +1332,17 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) 
 
 	meData := dataRecord(me.Payload)
 	statsData := dataRecord(stats.Payload)
+	todayStatsData := dataRecord(todayStats.Payload)
 	balance := firstNumber(meData, []string{"balance"})
 	totalRecharged := firstNumber(meData, []string{"total_recharged"})
-	if totalRecharged == nil || *totalRecharged == 0 {
-		if totalActualCost := firstNumber(statsData, []string{"total_actual_cost"}); totalActualCost != nil && balance != nil {
-			fallbackTotal := *totalActualCost + *balance
-			totalRecharged = &fallbackTotal
+	// Some Sub2API versions record admin balance adjustments in balance history
+	// without incrementing total_recharged. Lifetime spend plus current balance
+	// observes those additions without requiring access to an admin-only endpoint.
+	// Keep the larger value so later deductions cannot make recharge history fall.
+	if totalActualCost := firstNumber(statsData, []string{"total_actual_cost"}); totalActualCost != nil && balance != nil {
+		inferredTotal := *totalActualCost + *balance
+		if totalRecharged == nil || inferredTotal > *totalRecharged {
+			totalRecharged = &inferredTotal
 		}
 	}
 
@@ -1329,7 +1352,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) 
 	}
 	return Metrics{
 		Balance:         metric(balance),
-		TodayConsume:    metric(firstNumber(statsData, []string{"today_actual_cost"})),
+		TodayConsume:    metric(firstNumber(todayStatsData, []string{"total_actual_cost", "actual_cost"})),
 		HistoryRecharge: metric(totalRecharged),
 		Group:           firstGroup,
 		Groups:          groups,
@@ -1356,14 +1379,12 @@ func newAPIUserID(loginData map[string]any) string {
 }
 
 func todayStart() int64 {
-	now := time.Now()
-	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	start, _ := apptimezone.DayBoundsAt(time.Now())
 	return start.Unix()
 }
 
 func todayEnd() int64 {
-	now := time.Now()
-	end := time.Date(now.Year(), now.Month(), now.Day(), 23, 59, 59, int(time.Second-time.Nanosecond), now.Location())
+	_, end := apptimezone.DayBoundsAt(time.Now())
 	return end.Unix()
 }
 
@@ -1510,11 +1531,11 @@ func (s *PlatformService) fetchNewAPIAdminUsageStats(session Session, startDate,
 	if !session.IsAuthenticated() {
 		return 0, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
-	start, err := time.Parse("2006-01-02", startDate)
+	start, err := apptimezone.ParseDate(startDate)
 	if err != nil {
 		return 0, err
 	}
-	end, err := time.Parse("2006-01-02", endDate)
+	end, err := apptimezone.ParseDate(endDate)
 	if err != nil {
 		return 0, err
 	}
@@ -2334,11 +2355,13 @@ func (s *PlatformService) UpdateSub2APIAdminAccountStatus(session Session, accou
 // required by balance protection and the scheduling UI. The complete response
 // remains internal to PlatformService so credentials never cross module APIs.
 type Sub2APIAdminAccountState struct {
-	ID          string
-	Name        string
-	Status      string
-	Schedulable *bool
-	Priority    *int
+	ID            string
+	Name          string
+	Status        string
+	Schedulable   *bool
+	Priority      *int
+	GroupIDs      []string
+	GroupIDsKnown bool
 }
 
 // GetSub2APIAdminAccountState reads one forwarding account without exposing its
@@ -2368,12 +2391,15 @@ func sub2APIAdminAccountStateFromPayload(accountID string, payload any) (Sub2API
 		defaultPriority := 1
 		priority = &defaultPriority
 	}
+	groupIDs, groupIDsKnown := parseSub2APIAccountGroupIDs(data)
 	return Sub2APIAdminAccountState{
-		ID:          accountID,
-		Name:        safeString(data, "name"),
-		Status:      stringOrNumberField(data, []string{"status"}),
-		Schedulable: firstBoolValue(data, []string{"schedulable"}),
-		Priority:    priority,
+		ID:            accountID,
+		Name:          safeString(data, "name"),
+		Status:        stringOrNumberField(data, []string{"status"}),
+		Schedulable:   firstBoolValue(data, []string{"schedulable"}),
+		Priority:      priority,
+		GroupIDs:      groupIDs,
+		GroupIDsKnown: groupIDsKnown,
 	}, nil
 }
 

@@ -618,6 +618,16 @@ func (s *Service) RealBind(ctx context.Context, userID string, req RealBindReque
 
 // ListRealConnections 获取指定用户的所有真实对接绑定记录。
 func (s *Service) ListRealConnections(ctx context.Context, userID string) ([]RealConnection, error) {
+	return s.listRealConnections(ctx, userID, false)
+}
+
+// ListRealConnectionsReconciled first compares Sub2API account group_ids with
+// the stored binding so direct changes made in Sub2API are reflected in the UI.
+func (s *Service) ListRealConnectionsReconciled(ctx context.Context, userID string) ([]RealConnection, error) {
+	return s.listRealConnections(ctx, userID, true)
+}
+
+func (s *Service) listRealConnections(ctx context.Context, userID string, reconcileRemote bool) ([]RealConnection, error) {
 	if s.connRepository == nil {
 		return nil, nil
 	}
@@ -638,6 +648,9 @@ func (s *Service) ListRealConnections(ctx context.Context, userID string) ([]Rea
 		for _, pause := range pauses {
 			pausesByConnection[pause.ConnectionID] = append(pausesByConnection[pause.ConnectionID], pause)
 		}
+	}
+	if reconcileRemote {
+		connections = s.reconcileSub2APIRealConnectionGroups(ctx, userID, adminAccountID, connections, pausesByConnection)
 	}
 	for i := range connections {
 		for _, pause := range pausesByConnection[connections[i].ID] {

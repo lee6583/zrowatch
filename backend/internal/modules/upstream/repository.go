@@ -199,6 +199,12 @@ func (r *Repository) DeleteSite(ctx context.Context, userID string, id string) e
 	if _, err := tx.Exec(ctx, `DELETE FROM upstream_balance_account_pauses WHERE user_id = $1 AND upstream_site_id = $2`, userID, id); err != nil {
 		return err
 	}
+	if _, err := tx.Exec(ctx, `DELETE FROM upstream_balance_profit_cycle_accounts WHERE user_id = $1 AND upstream_site_id = $2`, userID, id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM upstream_balance_profit_cycles WHERE user_id = $1 AND upstream_site_id = $2`, userID, id); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `DELETE FROM upstream_sites WHERE user_id = $1 AND id = $2`, userID, id); err != nil {
 		return err
 	}

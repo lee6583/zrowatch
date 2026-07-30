@@ -138,6 +138,42 @@ func TestGetSub2APIAdminAccountState_DefaultsPriorityToOne(t *testing.T) {
 	if state.Priority == nil || *state.Priority != 1 {
 		t.Fatalf("expected default priority=1, got %+v", state.Priority)
 	}
+	if state.GroupIDsKnown {
+		t.Fatalf("group IDs must remain unknown when the response omits group_ids and groups")
+	}
+}
+
+func TestGetSub2APIAdminAccountState_ParsesNumericAndEmptyGroupIDs(t *testing.T) {
+	responses := []map[string]any{
+		{"id": "acc-1", "status": "active", "schedulable": true, "group_ids": []any{float64(8), "12"}},
+		{"id": "acc-1", "status": "active", "schedulable": true, "group_ids": []any{}},
+	}
+	requestIndex := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/api/v1/admin/accounts/acc-1" {
+			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+		writeJSON(w, map[string]any{"data": responses[requestIndex]})
+		requestIndex++
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token", TokenType: "Bearer"}
+	state, err := service.GetSub2APIAdminAccountState(session, "acc-1")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !state.GroupIDsKnown || len(state.GroupIDs) != 2 || state.GroupIDs[0] != "8" || state.GroupIDs[1] != "12" {
+		t.Fatalf("unexpected parsed group IDs: known=%v ids=%v", state.GroupIDsKnown, state.GroupIDs)
+	}
+	state, err = service.GetSub2APIAdminAccountState(session, "acc-1")
+	if err != nil {
+		t.Fatalf("unexpected empty-list error: %v", err)
+	}
+	if !state.GroupIDsKnown || len(state.GroupIDs) != 0 {
+		t.Fatalf("explicit empty group_ids must be known and empty, got known=%v ids=%v", state.GroupIDsKnown, state.GroupIDs)
+	}
 }
 
 // TestUpdateSub2APIAdminAccountStatus_NumericGroupIDsStayNumeric 是本次整改的核心回归测试：

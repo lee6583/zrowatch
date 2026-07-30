@@ -13,7 +13,7 @@ func availableGroupsFixture(w http.ResponseWriter) {
 		"data": []map[string]any{
 			{"id": 1, "name": "default", "platform": "openai", "rate_multiplier": 1.0},
 			{"id": 2, "name": "vip", "platform": "openai", "rate_multiplier": 2.0},
-			{"id": 3, "name": "stable", "platform": "claude", "rate_multiplier": 3.0},
+			{"id": 3, "name": "stable", "platform": "claude", "rate_multiplier": 3.0, "claude_code_only": true},
 		},
 	})
 }
@@ -82,6 +82,9 @@ func TestFetchSub2APIAdminGroups_DedicatedMultiplier(t *testing.T) {
 	}
 	if stable.HasDedicatedMultiplier {
 		t.Errorf("stable should not have dedicated multiplier flag set")
+	}
+	if !stable.ClaudeCodeOnly {
+		t.Error("stable should preserve the claude_code_only capability flag")
 	}
 	if stable.DedicatedMultiplier != nil {
 		t.Errorf("stable DedicatedMultiplier should be nil, got %v", *stable.DedicatedMultiplier)
@@ -199,6 +202,11 @@ func TestFetchSub2APIMetrics_UsesOverriddenMultiplier(t *testing.T) {
 			writeJSON(w, map[string]any{"data": map[string]any{"balance": 10.0, "total_recharged": 20.0}})
 		case "/api/v1/usage/dashboard/stats":
 			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0}})
+		case "/api/v1/usage/stats":
+			if got := r.URL.Query().Get("timezone"); got != "Asia/Shanghai" {
+				t.Fatalf("timezone = %q, want Asia/Shanghai", got)
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1.0}})
 		case "/api/v1/groups/available":
 			availableGroupsFixture(w)
 		case "/api/v1/groups/rates":
@@ -230,6 +238,65 @@ func TestFetchSub2APIMetrics_UsesOverriddenMultiplier(t *testing.T) {
 	stable := byName["stable"]
 	if stable.Multiplier == nil || *stable.Multiplier != 3.0 {
 		t.Errorf("Metrics.Groups stable multiplier = %v, want 3.0 (kept default)", stable.Multiplier)
+	}
+}
+
+func TestFetchSub2APIMetrics_IncludesAdminBalanceRecharge(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			// total_recharged is stale after an administrator manually adds balance.
+			writeJSON(w, map[string]any{"data": map[string]any{"balance": 80.0, "total_recharged": 50.0}})
+		case "/api/v1/usage/dashboard/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 20.0}})
+		case "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1.0}})
+		case "/api/v1/groups/available":
+			availableGroupsFixture(w)
+		case "/api/v1/groups/rates":
+			writeJSON(w, map[string]any{"data": map[string]any{}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	metrics, err := service.fetchSub2APIMetrics(Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if metrics.HistoryRecharge.Value == nil || *metrics.HistoryRecharge.Value != 100.0 {
+		t.Fatalf("history recharge = %v, want 100 from lifetime cost plus current balance", metrics.HistoryRecharge.Value)
+	}
+}
+
+func TestFetchSub2APIMetrics_DoesNotDecreaseReportedRechargeAfterBalanceDeduction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			writeJSON(w, map[string]any{"data": map[string]any{"balance": 20.0, "total_recharged": 100.0}})
+		case "/api/v1/usage/dashboard/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"today_actual_cost": 1.0, "total_actual_cost": 50.0}})
+		case "/api/v1/usage/stats":
+			writeJSON(w, map[string]any{"data": map[string]any{"total_actual_cost": 1.0}})
+		case "/api/v1/groups/available":
+			availableGroupsFixture(w)
+		case "/api/v1/groups/rates":
+			writeJSON(w, map[string]any{"data": map[string]any{}})
+		default:
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	metrics, err := service.fetchSub2APIMetrics(Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "token"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if metrics.HistoryRecharge.Value == nil || *metrics.HistoryRecharge.Value != 100.0 {
+		t.Fatalf("history recharge = %v, want reported cumulative value 100", metrics.HistoryRecharge.Value)
 	}
 }
 

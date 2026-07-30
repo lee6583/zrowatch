@@ -21,7 +21,7 @@ COPY backend/ .
 RUN CGO_ENABLED=0 go build -o /out/transithub-api ./cmd/api
 
 FROM golang:1.26.1-alpine
-RUN mkdir -p /app/data
+RUN apk add --no-cache tzdata && mkdir -p /app/data
 
 COPY --from=backend-builder /out/transithub-api /app/transithub-api
 COPY --from=frontend-builder /src/frontend/dist /app/public
@@ -29,6 +29,7 @@ COPY --from=frontend-builder /src/frontend/dist /app/public
 ENV PORT=10621
 ENV PUBLIC_DIR=/app/public
 ENV TICKET_UPLOAD_DIR=/app/data/ticket-uploads
+ENV TZ=Asia/Shanghai
 EXPOSE 10621
 
 ENTRYPOINT ["/app/transithub-api"]

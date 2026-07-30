@@ -56,6 +56,26 @@ func TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint(t *testing.
 	}
 }
 
+func TestProbe_BaseURLWithVersionSuffixDoesNotDuplicateV1(t *testing.T) {
+	var gotPath string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	outcome := NewRealProbeRunner().Probe(context.Background(), ProbeRequest{
+		BaseURL: server.URL + "/v1", UpstreamKey: "gateway-key", ModelName: "gpt-test",
+	})
+	if outcome.Result != ResultOK {
+		t.Fatalf("expected ok, got %s (%s)", outcome.Result, outcome.Detail)
+	}
+	if gotPath != "/v1/chat/completions" {
+		t.Fatalf("expected one version segment, got %s", gotPath)
+	}
+}
+
 func TestProbe_DefaultModelPerProviderWhenModelNameEmpty(t *testing.T) {
 	cases := map[string]string{
 		ProviderGemini:    "gemini-1.5-flash",
@@ -80,6 +100,17 @@ func TestProbe_DefaultModelPerProviderWhenModelNameEmpty(t *testing.T) {
 
 		if gotModel != wantModel {
 			t.Fatalf("provider=%s: expected default model %s, got %s", family, wantModel, gotModel)
+		}
+	}
+}
+
+func TestProbeTimeoutForProvider(t *testing.T) {
+	if got := probeTimeoutForProvider(ProviderAnthropic); got != 30*time.Second {
+		t.Fatalf("expected anthropic probe timeout 30s, got %s", got)
+	}
+	for _, family := range []string{ProviderOpenAI, ProviderGemini, ProviderCustom, ""} {
+		if got := probeTimeoutForProvider(family); got != 10*time.Second {
+			t.Fatalf("provider=%q: expected default probe timeout 10s, got %s", family, got)
 		}
 	}
 }

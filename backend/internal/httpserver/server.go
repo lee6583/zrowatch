@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -278,7 +279,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		if err != nil {
 			log.Printf("[alert] 加载工作区通知策略失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
 		} else {
-			checkBalanceWarning(ctx, settingsService, balanceControlService, strategy, userID, adminAccountID, siteID, siteName, newMetrics)
+			checkBalanceWarning(ctx, settingsService, balanceControlService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 		}
 		costGuardEnabled := false
 		if settings, settingsErr := connHealthService.GroupRateMonitorSettings(ctx, userID); settingsErr != nil {
@@ -568,8 +569,8 @@ func makeAllowedOrigins(origins []string) map[string]struct{} {
 // checkBalanceWarning evaluates the durable balance guard. Robot selection only
 // controls notification delivery; the safety action still runs when no bot is
 // configured.
-func checkBalanceWarning(ctx context.Context, svc *settings.Service, guard *balance_control.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, newMetrics upstream.Metrics) balance_control.Result {
-	result := guard.Reconcile(ctx, userID, adminAccountID, siteID, siteName, strategy, newMetrics)
+func checkBalanceWarning(ctx context.Context, svc *settings.Service, guard *balance_control.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics) balance_control.Result {
+	result := guard.Reconcile(ctx, userID, adminAccountID, siteID, siteName, strategy, oldMetrics, newMetrics)
 	if !result.Known || result.Transition == "" {
 		return result
 	}
@@ -703,11 +704,53 @@ func formatBalanceLifecycle(siteName string, result balance_control.Result, cust
 		message := formatBalanceWarning(siteName, result.BalanceCNY, result.Threshold, customTemplate)
 		message += fmt.Sprintf("已自动关闭站点调用；账户处理：成功 %d，跳过 %d，失败 %d", len(result.Paused), len(result.Skipped), len(result.Failed))
 		message += formatBalanceAccountSummary(result.Paused, result.Skipped, result.Failed)
+		message += formatBalanceProfitSummary(result.Profit)
 		return message
 	}
 	message := fmt.Sprintf("【余额恢复】%s 站点余额已恢复至 %.2f CNY（阈值 %.2f）；账户恢复：成功 %d，失败 %d，待重试 %d", siteName, result.BalanceCNY, result.Threshold, len(result.Restored), len(result.Failed), result.PendingRestores)
 	message += formatBalanceAccountSummary(result.Restored, result.Skipped, result.Failed)
 	return message
+}
+
+func formatBalanceProfitSummary(report *balance_control.ProfitReport) string {
+	if report == nil {
+		return ""
+	}
+	var builder strings.Builder
+	builder.WriteString("\n\n【本充值周期盈亏】\n")
+	if !report.CycleFound {
+		if report.Reason == "cycle_missing" {
+			builder.WriteString("充值周期起点未完整记录，暂无法准确计算总盈利或总亏损。")
+		} else {
+			builder.WriteString("盈亏统计数据暂不可用，未影响站点和账户的自动停用。")
+		}
+		return builder.String()
+	}
+	builder.WriteString(fmt.Sprintf("充值合计：¥%.2f\n", report.RechargeAmountCNY))
+	if !report.Complete {
+		builder.WriteString(fmt.Sprintf("已统计下游用户扣费：¥%.2f\n", report.DownstreamIncomeCNY))
+		builder.WriteString(fmt.Sprintf("统计不完整，暂无法准确计算总盈利或总亏损（成功 %d 个账户，失败 %d 个账户）。", report.SuccessfulAccounts, report.FailedAccounts))
+	} else {
+		builder.WriteString(fmt.Sprintf("下游用户扣费：¥%.2f\n", report.DownstreamIncomeCNY))
+		switch {
+		case report.ProfitCNY > 0.005:
+			builder.WriteString(fmt.Sprintf("总盈利：¥%.2f", report.ProfitCNY))
+		case report.ProfitCNY < -0.005:
+			builder.WriteString(fmt.Sprintf("总亏损：¥%.2f", math.Abs(report.ProfitCNY)))
+		default:
+			builder.WriteString("盈亏持平：¥0.00")
+		}
+	}
+	if len(report.Groups) > 0 || report.UnattributedIncome > 0.005 {
+		builder.WriteString("\n分组收入：")
+		for _, group := range report.Groups {
+			builder.WriteString(fmt.Sprintf("\n- %s：¥%.2f", group.GroupName, group.Amount))
+		}
+		if report.UnattributedIncome > 0.005 {
+			builder.WriteString(fmt.Sprintf("\n- 未归属收入：¥%.2f", report.UnattributedIncome))
+		}
+	}
+	return builder.String()
 }
 
 func formatBalanceAccountSummary(groups ...[]balance_control.AccountAction) string {

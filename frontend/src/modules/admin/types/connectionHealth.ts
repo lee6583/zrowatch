@@ -59,6 +59,7 @@ export type AdminProbeUnavailableReason =
   | 'model_unavailable'
   | 'export_unavailable'
   | 'credentials_redacted'
+  | 'claude_code_only'
 
 export interface AdminGroupHealthSummary {
   totalAccounts: number

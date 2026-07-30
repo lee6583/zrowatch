@@ -1574,6 +1574,7 @@ export default {
           model_unavailable: 'Model unavailable',
           export_unavailable: 'Account export unavailable',
           credentials_redacted: 'Account credentials are redacted',
+          claude_code_only: 'Claude Code clients only; generic probes will not disable this group',
           balance_suspended: 'Exhausted'
         },
         probe: {
@@ -1614,7 +1615,7 @@ export default {
           saved: 'Settings saved. Restored {restored}, pending {pending}, manual conflicts {conflict}.'
         },
         errors: {
-          modelRequired: 'A default model is required before automatic probing can be enabled.',
+          modelRequired: 'Configure a probe model that matches the group type; Anthropic groups cannot use GPT or Gemini models.',
           disabled: 'No probe model is configured. Configure probe settings first.',
           loadFailed: 'Failed to load health status. Please try again.',
           settingsLoadFailed: 'Failed to load probe settings. Please try again.',
