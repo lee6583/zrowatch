@@ -492,33 +492,43 @@ func (s *PlatformService) FetchSub2APIAdminAccountRuntimeSamples(session Session
 	if _, err := strconv.ParseInt(accountID, 10, 64); err != nil {
 		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 20
+	} else if limit > 200 {
+		limit = 200
 	}
 	startDate := since.In(apptimezone.Location()).Format("2006-01-02")
 	endDate := time.Now().In(apptimezone.Location()).Format("2006-01-02")
-	requestURL := session.BaseURL + "/api/v1/admin/usage?page=1&page_size=100&sort_by=created_at&sort_order=desc" +
-		"&account_id=" + url.QueryEscape(accountID) + "&start_date=" + url.QueryEscape(startDate) +
-		"&end_date=" + url.QueryEscape(endDate) + "&timezone=Asia%2FShanghai"
-	response, err := s.httpClient.requestJSON(requestURL, adminAuthOptions(session))
-	if err != nil {
-		return nil, err
-	}
 	result := make([]Sub2APIAccountRuntimeSample, 0, limit)
-	for _, item := range dataArray(response.Payload) {
-		createdAt := parseFlexibleTime(firstAny(item, []string{"created_at", "createdAt"}))
-		if createdAt == nil || createdAt.Before(since) {
-			continue
+	const usagePageSize = 100
+	for page := 1; len(result) < limit && page <= 20; page++ {
+		requestURL := session.BaseURL + "/api/v1/admin/usage?page=" + strconv.Itoa(page) +
+			"&page_size=" + strconv.Itoa(usagePageSize) + "&sort_by=created_at&sort_order=desc" +
+			"&account_id=" + url.QueryEscape(accountID) + "&start_date=" + url.QueryEscape(startDate) +
+			"&end_date=" + url.QueryEscape(endDate) + "&timezone=Asia%2FShanghai"
+		response, err := s.httpClient.requestJSON(requestURL, adminAuthOptions(session))
+		if err != nil {
+			return nil, err
 		}
-		record := dataRecord(item)
-		firstToken := firstInt(record, []string{"first_token_ms", "firstTokenMs"})
-		outputTokens := firstNumber(item, []string{"output_tokens", "outputTokens"})
-		success, attributable := sub2APIAccountRuntimeOutcome(record, firstToken, outputTokens)
-		if !attributable {
-			continue
+		items := dataArray(response.Payload)
+		for _, item := range items {
+			createdAt := parseFlexibleTime(firstAny(item, []string{"created_at", "createdAt"}))
+			if createdAt == nil || createdAt.Before(since) {
+				continue
+			}
+			record := dataRecord(item)
+			firstToken := firstInt(record, []string{"first_token_ms", "firstTokenMs"})
+			outputTokens := firstNumber(item, []string{"output_tokens", "outputTokens"})
+			success, attributable := sub2APIAccountRuntimeOutcome(record, firstToken, outputTokens)
+			if !attributable {
+				continue
+			}
+			result = append(result, Sub2APIAccountRuntimeSample{Success: success, LatencyMs: firstToken, CreatedAt: *createdAt})
+			if len(result) == limit {
+				break
+			}
 		}
-		result = append(result, Sub2APIAccountRuntimeSample{Success: success, LatencyMs: firstToken, CreatedAt: *createdAt})
-		if len(result) == limit {
+		if len(items) < usagePageSize {
 			break
 		}
 	}

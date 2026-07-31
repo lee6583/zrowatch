@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -111,6 +112,56 @@ func TestFetchSub2APIAdminAccountRuntimeSamplesFallsBackWhenOpsMonitoringIsUnava
 	samples, err := service.FetchSub2APIAdminAccountRuntimeSamples(session, "42", now.Add(-24*time.Hour), 20)
 	if err != nil || len(samples) != 1 || !samples[0].Success {
 		t.Fatalf("expected successful usage fallback, samples=%#v err=%v", samples, err)
+	}
+}
+
+func TestFetchSub2APIAdminAccountRuntimeSamplesPaginatesAndCapsNewest200(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	usagePages := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/admin/usage":
+			usagePages++
+			page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+			items := make([]map[string]any, 0, 100)
+			for index := 0; index < 100; index++ {
+				offset := (page-1)*100 + index
+				items = append(items, map[string]any{
+					"created_at":     now.Add(-time.Duration(offset+1) * time.Second).Format(time.RFC3339),
+					"first_token_ms": 500 + offset,
+					"output_tokens":  1,
+				})
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"items": items}})
+		case "/api/v1/admin/ops/upstream-errors":
+			if r.URL.Query().Get("page_size") != "200" {
+				t.Fatalf("error page_size = %q, want 200", r.URL.Query().Get("page_size"))
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"items": []map[string]any{
+				{"created_at": now.Format(time.RFC3339), "status_code": 500, "phase": "upstream"},
+			}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "test-token"}
+	samples, err := service.FetchSub2APIAdminAccountRuntimeSamples(session, "42", now.Add(-10*time.Minute), 200)
+	if err != nil {
+		t.Fatalf("FetchSub2APIAdminAccountRuntimeSamples() error = %v", err)
+	}
+	if usagePages != 2 || len(samples) != 200 {
+		t.Fatalf("usage pages/samples = %d/%d, want 2/200", usagePages, len(samples))
+	}
+	if samples[0].Success || samples[0].CreatedAt != now {
+		t.Fatalf("newest merged sample = %#v", samples[0])
+	}
+	for index := 1; index < len(samples); index++ {
+		if samples[index].CreatedAt.After(samples[index-1].CreatedAt) {
+			t.Fatalf("samples are not newest-first at index %d", index)
+		}
 	}
 }
 

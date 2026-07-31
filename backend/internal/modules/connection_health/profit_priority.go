@@ -13,12 +13,18 @@ import (
 )
 
 const (
-	profitPriorityRuntimeWindow = 24 * time.Hour
-	profitPriorityRuntimeLimit  = 20
-	profitPriorityProbeLimit    = 5
-	profitPriorityCacheTTL      = time.Minute
-	profitPriorityLatencyAbsMs  = 2000
-	profitPriorityLatencyRatio  = 0.20
+	profitPriorityRuntimeWindow       = 10 * time.Minute
+	profitPriorityRuntimeLimit        = 200
+	profitPriorityProbeLimit          = 5
+	profitPriorityCacheTTL            = time.Minute
+	profitPriorityObservationInterval = time.Minute
+	profitPriorityMinSamples          = 30
+	profitPriorityEWMAAlpha           = 0.30
+	profitPriorityRankConfirmRounds   = 3
+	profitPriorityCooldown            = 5 * time.Minute
+	profitPrioritySpacing             = 10
+	profitPriorityLatencyAbsMs        = 2000
+	profitPriorityLatencyRatio        = 0.20
 )
 
 type ProfitPriorityActioner interface {
@@ -54,6 +60,12 @@ type profitPriorityCandidate struct {
 	stabilityRank int
 	successRate   *float64
 	latencyMs     *int
+	sampleCount   int
+	probeFailures int
+	hardFailure   bool
+	emergency     bool
+	costChanged   bool
+	observed      bool
 	ambiguousCost bool
 }
 
@@ -168,6 +180,16 @@ func (s *Service) reconcileProfitPriorityWorkspace(ctx context.Context, userID, 
 	for _, state := range states {
 		stateByAccount[state.AccountID] = state
 	}
+	now := time.Now()
+	for accountID, candidate := range candidates {
+		stored, exists := stateByAccount[accountID]
+		stored = prepareProfitPriorityState(now, candidate, stored, exists)
+		stateByAccount[accountID] = stored
+		if err := repo.UpsertProfitPriorityState(ctx, stored); err != nil {
+			delete(candidates, accountID)
+			result.Failed++
+		}
+	}
 	components := profitPriorityComponents(candidates)
 	for _, component := range components {
 		if len(component) < 2 {
@@ -183,9 +205,40 @@ func (s *Service) reconcileProfitPriorityWorkspace(ctx context.Context, userID, 
 		if base < 1 {
 			base = 1
 		}
+		componentReady := true
 		for index, candidate := range ranked {
-			desired := base + index
+			stored := stateByAccount[candidate.accountID]
+			if candidate.observed {
+				observedRank := index + 1
+				if stored.ObservedRank == observedRank {
+					stored.ObservedRankRounds++
+				} else {
+					stored.ObservedRank = observedRank
+					stored.ObservedRankRounds = 1
+				}
+				stateByAccount[candidate.accountID] = stored
+				if err := repo.UpsertProfitPriorityState(ctx, stored); err != nil {
+					componentReady = false
+					result.Failed++
+				}
+			}
+		}
+		if componentReady && !profitPriorityComponentReady(now, ranked, stateByAccount, base) {
+			componentReady = false
+		}
+		for index, candidate := range ranked {
+			desired := base + index*profitPrioritySpacing
 			stored, exists := stateByAccount[candidate.accountID]
+			if !componentReady {
+				if candidate.remotePriority() == desired {
+					result.Unchanged++
+				} else if stored.Conflict {
+					result.Conflict++
+				} else {
+					result.Skipped++
+				}
+				continue
+			}
 			status := s.applyProfitPriority(ctx, repo, session, candidate, desired, stored, exists)
 			switch status {
 			case "updated":
@@ -376,6 +429,8 @@ func profitProbeStatsByGroup(cycles []GroupRateProbeCycle) map[string]profitProb
 }
 
 func (candidate *profitPriorityCandidate) applyRuntimeAndProbe(runtime []upstream.Sub2APIAccountRuntimeSample, probe profitProbeStats) {
+	candidate.sampleCount = len(runtime)
+	candidate.probeFailures = probe.consecutiveFailures
 	successes := probe.successes
 	failures := probe.failures
 	latencies := make([]int, 0, len(runtime))
@@ -404,16 +459,166 @@ func (candidate *profitPriorityCandidate) applyRuntimeAndProbe(runtime []upstrea
 		rate := float64(successes) / float64(total)
 		candidate.successRate = &rate
 	}
+	candidate.hardFailure = probe.consecutiveFailures >= 2 ||
+		(candidate.sampleCount >= profitPriorityMinSamples && candidate.successRate != nil && *candidate.successRate < 0.60)
 	switch {
-	case probe.consecutiveFailures >= 2 || (total >= 3 && candidate.successRate != nil && *candidate.successRate < 0.60):
+	case candidate.hardFailure:
 		candidate.stabilityTier, candidate.stabilityRank = "unstable", 3
-	case probe.consecutiveFailures == 1 || (total >= 3 && candidate.successRate != nil && *candidate.successRate < 0.90):
+	case probe.consecutiveFailures == 1 || (candidate.sampleCount >= profitPriorityMinSamples && candidate.successRate != nil && *candidate.successRate < 0.90):
 		candidate.stabilityTier, candidate.stabilityRank = "warning", 2
-	case total < 3:
+	case candidate.sampleCount < profitPriorityMinSamples:
 		candidate.stabilityTier, candidate.stabilityRank = "unknown", 1
 	default:
 		candidate.stabilityTier, candidate.stabilityRank = "stable", 0
 	}
+}
+
+func prepareProfitPriorityState(now time.Time, candidate *profitPriorityCandidate, stored ProfitPriorityState, exists bool) ProfitPriorityState {
+	current := candidate.remotePriority()
+	if !exists {
+		stored = ProfitPriorityState{
+			UserID:              candidate.connection.UserID,
+			AdminAccountID:      candidate.connection.WorkspaceAdminAccountID,
+			AccountID:           candidate.accountID,
+			OriginalPriority:    current,
+			LastAppliedPriority: current,
+			StabilityTier:       "unknown",
+		}
+	}
+	if stored.StabilityTier == "" {
+		stored.StabilityTier = "unknown"
+	}
+	if !stored.Conflict {
+		switch {
+		case stored.PendingPriority != nil && current == *stored.PendingPriority:
+			stored.LastAppliedPriority = current
+			stored.PendingPriority = nil
+		case exists && stored.PendingPriority == nil && current != stored.LastAppliedPriority:
+			stored.Conflict = true
+		case exists && stored.PendingPriority != nil && current != stored.LastAppliedPriority:
+			stored.PendingPriority = nil
+			stored.Conflict = true
+		}
+	}
+
+	candidate.costChanged = exists && stored.EffectiveCost != nil &&
+		math.Abs(*stored.EffectiveCost-candidate.effectiveCost) > 1e-9
+	cost := candidate.effectiveCost
+	stored.EffectiveCost = &cost
+
+	accepted := stored.LastObservedAt == nil || now.Sub(*stored.LastObservedAt) >= profitPriorityObservationInterval
+	if accepted {
+		candidate.observed = true
+		observedAt := now
+		stored.LastObservedAt = &observedAt
+		stored.SampleCount = candidate.sampleCount
+		stored.SuccessRate = profitPrioritySmoothFloat(stored.SuccessRate, candidate.successRate)
+		stored.LatencyMs = profitPrioritySmoothInt(stored.LatencyMs, candidate.latencyMs)
+	}
+
+	if candidate.hardFailure {
+		candidate.emergency = stored.StabilityTier != "unstable"
+		stored.StabilityTier = "unstable"
+		stored.ObservedStabilityTier = "unstable"
+		stored.ObservedStabilityRounds = 0
+	} else if accepted && candidate.sampleCount >= profitPriorityMinSamples {
+		target := profitPriorityTargetTier(stored.StabilityTier, stored.SuccessRate, candidate.probeFailures)
+		if target == stored.StabilityTier {
+			stored.ObservedStabilityTier = target
+			stored.ObservedStabilityRounds = 0
+		} else {
+			if stored.ObservedStabilityTier == target {
+				stored.ObservedStabilityRounds++
+			} else {
+				stored.ObservedStabilityTier = target
+				stored.ObservedStabilityRounds = 1
+			}
+			required := 2
+			if target == "stable" {
+				required = 3
+			}
+			if stored.ObservedStabilityRounds >= required {
+				stored.StabilityTier = target
+				stored.ObservedStabilityRounds = 0
+			}
+		}
+	}
+
+	candidate.successRate = stored.SuccessRate
+	candidate.latencyMs = stored.LatencyMs
+	candidate.stabilityTier = stored.StabilityTier
+	candidate.stabilityRank = profitPriorityStabilityRank(stored.StabilityTier)
+	return stored
+}
+
+func profitPrioritySmoothFloat(previous, current *float64) *float64 {
+	if current == nil {
+		return previous
+	}
+	value := *current
+	if previous != nil {
+		value = (1-profitPriorityEWMAAlpha)*(*previous) + profitPriorityEWMAAlpha*value
+	}
+	return &value
+}
+
+func profitPrioritySmoothInt(previous, current *int) *int {
+	if current == nil {
+		return previous
+	}
+	value := *current
+	if previous != nil {
+		value = int(math.Round((1-profitPriorityEWMAAlpha)*float64(*previous) + profitPriorityEWMAAlpha*float64(value)))
+	}
+	return &value
+}
+
+func profitPriorityTargetTier(current string, successRate *float64, probeFailures int) string {
+	if probeFailures > 0 || (successRate != nil && *successRate < 0.90) {
+		return "warning"
+	}
+	if successRate != nil && (*successRate >= 0.95 || (current == "unknown" && *successRate >= 0.90)) {
+		return "stable"
+	}
+	return current
+}
+
+func profitPriorityStabilityRank(tier string) int {
+	switch tier {
+	case "stable":
+		return 0
+	case "unknown":
+		return 1
+	case "warning":
+		return 2
+	case "unstable":
+		return 3
+	default:
+		return 1
+	}
+}
+
+func profitPriorityComponentReady(now time.Time, ranked []*profitPriorityCandidate, states map[string]ProfitPriorityState, base int) bool {
+	for _, candidate := range ranked {
+		if candidate.emergency || candidate.costChanged {
+			return true
+		}
+	}
+	for index, candidate := range ranked {
+		desired := base + index*profitPrioritySpacing
+		if candidate.remotePriority() == desired {
+			continue
+		}
+		stored := states[candidate.accountID]
+		if stored.Conflict {
+			continue
+		}
+		if stored.ObservedRank != index+1 || stored.ObservedRankRounds < profitPriorityRankConfirmRounds ||
+			(stored.CooldownUntil != nil && now.Before(*stored.CooldownUntil)) {
+			return false
+		}
+	}
+	return true
 }
 
 func profitPriorityComponents(candidates map[string]*profitPriorityCandidate) [][]*profitPriorityCandidate {
@@ -551,6 +756,8 @@ func (s *Service) applyProfitPriority(ctx context.Context, repo profitPriorityRe
 	}
 	stored.LastAppliedPriority = desired
 	stored.PendingPriority = nil
+	cooldownUntil := time.Now().Add(profitPriorityCooldown)
+	stored.CooldownUntil = &cooldownUntil
 	if err := repo.UpsertProfitPriorityState(ctx, stored); err != nil {
 		return "failed"
 	}

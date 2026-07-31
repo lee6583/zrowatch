@@ -6,18 +6,25 @@ import (
 )
 
 type ProfitPriorityState struct {
-	UserID              string
-	AdminAccountID      string
-	AccountID           string
-	OriginalPriority    int
-	LastAppliedPriority int
-	PendingPriority     *int
-	StabilityTier       string
-	SuccessRate         *float64
-	LatencyMs           *int
-	EffectiveCost       *float64
-	Conflict            bool
-	UpdatedAt           time.Time
+	UserID                  string
+	AdminAccountID          string
+	AccountID               string
+	OriginalPriority        int
+	LastAppliedPriority     int
+	PendingPriority         *int
+	StabilityTier           string
+	ObservedStabilityTier   string
+	ObservedStabilityRounds int
+	ObservedRank            int
+	ObservedRankRounds      int
+	SampleCount             int
+	SuccessRate             *float64
+	LatencyMs               *int
+	EffectiveCost           *float64
+	CooldownUntil           *time.Time
+	LastObservedAt          *time.Time
+	Conflict                bool
+	UpdatedAt               time.Time
 }
 
 type profitPriorityRepository interface {
@@ -29,7 +36,9 @@ type profitPriorityRepository interface {
 func (r *Repository) ListProfitPriorityStates(ctx context.Context, userID, adminAccountID string) ([]ProfitPriorityState, error) {
 	rows, err := r.db.Query(ctx, `
 		SELECT user_id, admin_account_id, account_id, original_priority, last_applied_priority,
-			pending_priority, stability_tier, success_rate, latency_ms, effective_cost, conflict, updated_at
+			pending_priority, stability_tier, observed_stability_tier, observed_stability_rounds,
+			observed_rank, observed_rank_rounds, sample_count, success_rate, latency_ms, effective_cost,
+			cooldown_until, last_observed_at, conflict, updated_at
 		FROM connection_health_profit_priority_states
 		WHERE user_id = $1 AND admin_account_id = $2
 	`, userID, adminAccountID)
@@ -41,8 +50,11 @@ func (r *Repository) ListProfitPriorityStates(ctx context.Context, userID, admin
 	for rows.Next() {
 		var state ProfitPriorityState
 		if err := rows.Scan(&state.UserID, &state.AdminAccountID, &state.AccountID, &state.OriginalPriority,
-			&state.LastAppliedPriority, &state.PendingPriority, &state.StabilityTier, &state.SuccessRate,
-			&state.LatencyMs, &state.EffectiveCost, &state.Conflict, &state.UpdatedAt); err != nil {
+			&state.LastAppliedPriority, &state.PendingPriority, &state.StabilityTier,
+			&state.ObservedStabilityTier, &state.ObservedStabilityRounds, &state.ObservedRank,
+			&state.ObservedRankRounds, &state.SampleCount, &state.SuccessRate, &state.LatencyMs,
+			&state.EffectiveCost, &state.CooldownUntil, &state.LastObservedAt, &state.Conflict,
+			&state.UpdatedAt); err != nil {
 			return nil, err
 		}
 		result = append(result, state)
@@ -54,20 +66,31 @@ func (r *Repository) UpsertProfitPriorityState(ctx context.Context, state Profit
 	_, err := r.db.Exec(ctx, `
 		INSERT INTO connection_health_profit_priority_states (
 			user_id, admin_account_id, account_id, original_priority, last_applied_priority,
-			pending_priority, stability_tier, success_rate, latency_ms, effective_cost, conflict, updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+			pending_priority, stability_tier, observed_stability_tier, observed_stability_rounds,
+			observed_rank, observed_rank_rounds, sample_count, success_rate, latency_ms, effective_cost,
+			cooldown_until, last_observed_at, conflict, updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
 		ON CONFLICT (user_id, admin_account_id, account_id) DO UPDATE SET
 			original_priority = EXCLUDED.original_priority,
 			last_applied_priority = EXCLUDED.last_applied_priority,
 			pending_priority = EXCLUDED.pending_priority,
 			stability_tier = EXCLUDED.stability_tier,
+			observed_stability_tier = EXCLUDED.observed_stability_tier,
+			observed_stability_rounds = EXCLUDED.observed_stability_rounds,
+			observed_rank = EXCLUDED.observed_rank,
+			observed_rank_rounds = EXCLUDED.observed_rank_rounds,
+			sample_count = EXCLUDED.sample_count,
 			success_rate = EXCLUDED.success_rate,
 			latency_ms = EXCLUDED.latency_ms,
 			effective_cost = EXCLUDED.effective_cost,
+			cooldown_until = EXCLUDED.cooldown_until,
+			last_observed_at = EXCLUDED.last_observed_at,
 			conflict = EXCLUDED.conflict,
 			updated_at = now()
 	`, state.UserID, state.AdminAccountID, state.AccountID, state.OriginalPriority, state.LastAppliedPriority,
-		state.PendingPriority, state.StabilityTier, state.SuccessRate, state.LatencyMs, state.EffectiveCost, state.Conflict)
+		state.PendingPriority, state.StabilityTier, state.ObservedStabilityTier, state.ObservedStabilityRounds,
+		state.ObservedRank, state.ObservedRankRounds, state.SampleCount, state.SuccessRate, state.LatencyMs,
+		state.EffectiveCost, state.CooldownUntil, state.LastObservedAt, state.Conflict)
 	return err
 }
 

@@ -223,6 +223,13 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			PRIMARY KEY (user_id, admin_account_id, account_id)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_connection_health_profit_priority_workspace ON connection_health_profit_priority_states (user_id, admin_account_id)`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS observed_stability_tier text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS observed_stability_rounds integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS observed_rank integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS observed_rank_rounds integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS sample_count integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS cooldown_until timestamptz NULL`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS last_observed_at timestamptz NULL`,
 		`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_overrides (
 			user_id text NOT NULL,
 			admin_account_id text NOT NULL DEFAULT '',

@@ -111,6 +111,144 @@ func TestProfitPriorityRuntimeAndProbeConsecutiveFailuresAreUnstable(t *testing.
 	}
 }
 
+func TestProfitPriorityEWMA(t *testing.T) {
+	previousRate, currentRate := 1.0, 0.5
+	if got := *profitPrioritySmoothFloat(&previousRate, &currentRate); got != 0.85 {
+		t.Fatalf("smoothed success rate = %.2f, want 0.85", got)
+	}
+	previousLatency, currentLatency := 1000, 3000
+	if got := *profitPrioritySmoothInt(&previousLatency, &currentLatency); got != 1600 {
+		t.Fatalf("smoothed latency = %d, want 1600", got)
+	}
+}
+
+func TestProfitPriorityDowngradeRequiresTwoAcceptedObservations(t *testing.T) {
+	now := time.Now().UTC()
+	rate := 0.80
+	stored := ProfitPriorityState{StabilityTier: "stable", SuccessRate: &rate, LastAppliedPriority: 10}
+
+	first := profitCandidate("42", 0, nil, 0.04, "18")
+	first.sampleCount, first.successRate = 30, &rate
+	stored = prepareProfitPriorityState(now, first, stored, true)
+	if stored.StabilityTier != "stable" || stored.ObservedStabilityRounds != 1 {
+		t.Fatalf("first observation should retain stable tier: %#v", stored)
+	}
+
+	second := profitCandidate("42", 0, nil, 0.04, "18")
+	second.sampleCount, second.successRate = 30, &rate
+	stored = prepareProfitPriorityState(now.Add(time.Minute), second, stored, true)
+	if stored.StabilityTier != "warning" {
+		t.Fatalf("second observation should confirm warning tier: %#v", stored)
+	}
+}
+
+func TestProfitPriorityStableRecoveryRequiresThreeAcceptedObservations(t *testing.T) {
+	now := time.Now().UTC()
+	rate := 1.0
+	stored := ProfitPriorityState{StabilityTier: "unstable", SuccessRate: &rate, LastAppliedPriority: 10}
+	for round := 1; round <= 3; round++ {
+		candidate := profitCandidate("42", 3, nil, 0.04, "18")
+		candidate.sampleCount, candidate.successRate = 30, &rate
+		stored = prepareProfitPriorityState(now.Add(time.Duration(round-1)*time.Minute), candidate, stored, true)
+		if round < 3 && stored.StabilityTier != "unstable" {
+			t.Fatalf("round %d recovered too early: %#v", round, stored)
+		}
+	}
+	if stored.StabilityTier != "stable" {
+		t.Fatalf("third observation should confirm stable recovery: %#v", stored)
+	}
+}
+
+func TestProfitPriorityInsufficientSamplesRetainConfirmedTier(t *testing.T) {
+	rate := 0.70
+	stored := ProfitPriorityState{StabilityTier: "stable", SuccessRate: &rate, LastAppliedPriority: 10}
+	candidate := profitCandidate("42", 0, nil, 0.04, "18")
+	candidate.sampleCount, candidate.successRate = 20, &rate
+	stored = prepareProfitPriorityState(time.Now().UTC(), candidate, stored, true)
+	if stored.StabilityTier != "stable" || stored.ObservedStabilityRounds != 0 {
+		t.Fatalf("insufficient samples changed confirmed tier: %#v", stored)
+	}
+}
+
+func TestProfitPriorityObservationDoesNotAdvanceTwiceWithinMinute(t *testing.T) {
+	now := time.Now().UTC()
+	rate := 0.80
+	stored := ProfitPriorityState{StabilityTier: "stable", SuccessRate: &rate, LastAppliedPriority: 10}
+	first := profitCandidate("42", 0, nil, 0.04, "18")
+	first.sampleCount, first.successRate = 30, &rate
+	stored = prepareProfitPriorityState(now, first, stored, true)
+	second := profitCandidate("42", 0, nil, 0.04, "18")
+	second.sampleCount, second.successRate = 30, &rate
+	stored = prepareProfitPriorityState(now.Add(30*time.Second), second, stored, true)
+	if second.observed || stored.ObservedStabilityRounds != 1 || stored.StabilityTier != "stable" {
+		t.Fatalf("duplicate observation advanced state: %#v", stored)
+	}
+}
+
+func TestProfitPriorityComponentRequiresConfirmedRankAndCooldown(t *testing.T) {
+	now := time.Now().UTC()
+	first := profitCandidate("a", 0, nil, 0.04, "18")
+	second := profitCandidate("b", 0, nil, 0.08, "18")
+	firstPriority, secondPriority := 20, 10
+	first.remote.Priority, second.remote.Priority = &firstPriority, &secondPriority
+	ranked := []*profitPriorityCandidate{first, second}
+	states := map[string]ProfitPriorityState{
+		"a": {ObservedRank: 1, ObservedRankRounds: 2},
+		"b": {ObservedRank: 2, ObservedRankRounds: 2},
+	}
+	if profitPriorityComponentReady(now, ranked, states, 10) {
+		t.Fatal("two rank observations should not allow a reorder")
+	}
+	states["a"] = ProfitPriorityState{ObservedRank: 1, ObservedRankRounds: 3}
+	states["b"] = ProfitPriorityState{ObservedRank: 2, ObservedRankRounds: 3}
+	if !profitPriorityComponentReady(now, ranked, states, 10) {
+		t.Fatal("three rank observations should allow a reorder")
+	}
+	cooldown := now.Add(time.Minute)
+	state := states["a"]
+	state.CooldownUntil = &cooldown
+	states["a"] = state
+	if profitPriorityComponentReady(now, ranked, states, 10) {
+		t.Fatal("cooldown should block an ordinary reorder")
+	}
+	first.emergency = true
+	if !profitPriorityComponentReady(now, ranked, states, 10) {
+		t.Fatal("emergency degradation should bypass cooldown")
+	}
+	first.emergency, first.costChanged = false, true
+	if !profitPriorityComponentReady(now, ranked, states, 10) {
+		t.Fatal("cost change should bypass cooldown")
+	}
+}
+
+func TestProfitPriorityHardFailureIsImmediateOnlyOnTransition(t *testing.T) {
+	now := time.Now().UTC()
+	stored := ProfitPriorityState{StabilityTier: "stable", LastAppliedPriority: 10}
+	candidate := profitCandidate("42", 0, nil, 0.04, "18")
+	candidate.hardFailure = true
+	stored = prepareProfitPriorityState(now, candidate, stored, true)
+	if stored.StabilityTier != "unstable" || !candidate.emergency {
+		t.Fatalf("hard failure should immediately enter unstable tier: %#v", stored)
+	}
+	next := profitCandidate("42", 3, nil, 0.04, "18")
+	next.hardFailure = true
+	_ = prepareProfitPriorityState(now.Add(30*time.Second), next, stored, true)
+	if next.emergency {
+		t.Fatal("an already unstable account should not bypass cooldown every tick")
+	}
+}
+
+func TestProfitPriorityUsesSparsePrioritySpacing(t *testing.T) {
+	base := 3
+	got := []int{base, base + profitPrioritySpacing, base + 2*profitPrioritySpacing}
+	want := []int{3, 13, 23}
+	for index := range want {
+		if got[index] != want[index] {
+			t.Fatalf("priority %d = %d, want %d", index, got[index], want[index])
+		}
+	}
+}
+
 func TestProfitPriorityComponentsOnlyMergeSharedGroups(t *testing.T) {
 	candidates := map[string]*profitPriorityCandidate{
 		"a": profitCandidate("a", 0, nil, 0.04, "18"),
