@@ -236,6 +236,9 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	// 注入平台中性的分组/账号读取能力：admin 分组健康主列表用它拉取 admin 全量分组及
 	// 分组下账号/渠道，叠加 real_connections 探活状态。platformService 已实现所需方法。
 	connHealthService.SetPlatformGroupReader(platformService)
+	mySitesService.SetRealConnectionsChangedHook(func(ctx context.Context, userID, adminAccountID string) {
+		connHealthService.ReconcileProfitPriorityWorkspace(ctx, userID, adminAccountID)
+	})
 	connection_health.RegisterRoutes(server.mux, connHealthService)
 
 	// 所有 workspace 表 schema 完成后再补 legacy 归属；随后才启动 restore、worker 和 scheduler，
@@ -290,8 +293,13 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		// 自动调价：分组级 enableAutoPricing 是唯一开关，Service 内部逐 mapping 判断。
 		mySitesService.ApplyAutoPricingAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics)
 		costGuardResults := mySitesService.ApplyGroupRateCostGuardAfterSync(ctx, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, costGuardEnabled)
+		connHealthService.ReconcileProfitPriorityWorkspace(ctx, userID, adminAccountID)
 		if err == nil {
-			checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, renameResults, costGuardResults)
+			connections, connectionsErr := mySitesService.ListRealConnectionsForWorkspace(ctx, userID, adminAccountID)
+			if connectionsErr != nil {
+				log.Printf("[alert] 加载倍率对接状态失败 user_id=%s admin_account_id=%s site_id=%s err=%v", userID, adminAccountID, siteID, connectionsErr)
+			}
+			checkMultiplierChanges(ctx, settingsService, strategy, userID, adminAccountID, siteID, siteName, oldMetrics, newMetrics, renameResults, costGuardResults, connections, connectionsErr == nil)
 		}
 	}
 
@@ -587,8 +595,7 @@ func checkBalanceWarning(ctx context.Context, svc *settings.Service, guard *bala
 
 // checkMultiplierChanges 对比同步前后的分组倍率，任何变化都发送通知。
 // 使用发生同步的工作区策略，由 strategy.EnableMultiplierAlert 控制。
-func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, renameResults []my_sites.AccountRenameResult, costGuardResults []my_sites.GroupRateCostGuardResult) {
-	_ = siteID
+func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy settings.StrategySettings, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, renameResults []my_sites.AccountRenameResult, costGuardResults []my_sites.GroupRateCostGuardResult, connections []my_sites.RealConnection, connectionStateKnown bool) {
 	if !strategy.EnableMultiplierAlert || len(strategy.MultiplierNotifyBotIDs) == 0 {
 		return
 	}
@@ -597,25 +604,65 @@ func checkMultiplierChanges(ctx context.Context, svc *settings.Service, strategy
 	}
 	oldMap := make(map[string]float64, len(oldMetrics.Groups))
 	for _, g := range oldMetrics.Groups {
+		key := g.ID + "|" + g.Name
 		if g.Multiplier != nil {
-			oldMap[g.ID+"|"+g.Name] = *g.Multiplier
+			oldMap[key] = *g.Multiplier
 		}
 	}
 	for _, g := range newMetrics.Groups {
-		if g.Multiplier == nil {
+		key := g.ID + "|" + g.Name
+		if g.Multiplier == nil || g.EffectiveMultiplierUnverified {
 			continue
 		}
-		key := g.ID + "|" + g.Name
 		oldVal, existed := oldMap[key]
 		if !existed || oldVal == *g.Multiplier {
 			continue
 		}
 		msg := formatMultiplierChange(siteName, g.Name, oldVal, *g.Multiplier, strategy.MultiplierTemplate)
+		if connectionStateKnown {
+			msg = classifyMultiplierChangeMessage(msg, isUpstreamGroupMapped(connections, siteID, g.ID, g.Name))
+		}
 		msg += formatAccountRenameSummary(g.Name, renameResults)
 		msg += formatCostGuardSummary(siteID, g.Name, costGuardResults)
 		log.Printf("[alert] 倍率变更触发 site=%s group=%s old=%.4f new=%.4f", siteName, g.Name, oldVal, *g.Multiplier)
 		svc.SendToBotsForWorkspace(ctx, userID, adminAccountID, strategy.MultiplierNotifyBotIDs, msg)
 	}
+}
+
+func isUpstreamGroupMapped(connections []my_sites.RealConnection, siteID, groupID, groupName string) bool {
+	siteID = strings.TrimSpace(siteID)
+	groupID = strings.TrimSpace(groupID)
+	groupName = strings.TrimSpace(groupName)
+	for _, connection := range connections {
+		if strings.TrimSpace(connection.UpstreamSiteID) != siteID ||
+			(connection.Status != "" && connection.Status != my_sites.ConnectionStatusActive) {
+			continue
+		}
+		connectionGroupID := strings.TrimSpace(connection.UpstreamGroupID)
+		if groupID != "" && connectionGroupID != "" {
+			if groupID == connectionGroupID {
+				return true
+			}
+			continue
+		}
+		if groupName != "" && groupName == strings.TrimSpace(connection.UpstreamGroupName) {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyMultiplierChangeMessage(message string, mapped bool) string {
+	title := "【未对接倍率变更】"
+	if mapped {
+		title = "【已对接倍率变更】"
+	}
+	for _, existing := range []string{"【倍率变更】", "【已对接倍率变更】", "【未对接倍率变更】"} {
+		if strings.Contains(message, existing) {
+			return strings.Replace(message, existing, title, 1)
+		}
+	}
+	return title + message
 }
 
 func formatAccountRenameSummary(groupName string, results []my_sites.AccountRenameResult) string {

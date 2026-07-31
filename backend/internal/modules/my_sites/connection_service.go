@@ -288,7 +288,11 @@ func (s *Service) persistConnection(ctx context.Context, conn RealConnection) er
 		return requestError(ErrorRequest)
 	}
 	if repository, ok := s.connRepository.(AtomicRealConnectionRepository); ok {
-		return repository.SaveRealConnectionWithPricingMapping(ctx, conn)
+		if err := repository.SaveRealConnectionWithPricingMapping(ctx, conn); err != nil {
+			return err
+		}
+		s.notifyRealConnectionsChanged(ctx, conn.UserID, conn.WorkspaceAdminAccountID)
+		return nil
 	}
 	if err := s.connRepository.SaveRealConnection(ctx, conn); err != nil {
 		return err
@@ -298,6 +302,7 @@ func (s *Service) persistConnection(ctx context.Context, conn RealConnection) er
 	if conn.PricingMappingEnabled {
 		s.addUpstreamMapping(ctx, conn.UserID, conn.WorkspaceAdminAccountID, conn.OwnGroupIDs, conn.UpstreamSiteID, conn.UpstreamGroupName)
 	}
+	s.notifyRealConnectionsChanged(ctx, conn.UserID, conn.WorkspaceAdminAccountID)
 	return nil
 }
 
@@ -628,6 +633,7 @@ func (s *Service) UpdateRealConnectionGroups(ctx context.Context, userID, connec
 	conn.OwnGroupNames = groupNames
 	conn.CostGuardPausedOwnGroupIDs = []string{}
 	conn.CostGuardPausedOwnGroupNames = []string{}
+	s.notifyRealConnectionsChanged(ctx, userID, adminAccountID)
 	return publicRealConnection(*conn), nil
 }
 
@@ -808,6 +814,7 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 				}
 			}
 		}
+		s.notifyRealConnectionsChanged(ctx, userID, adminAccountID)
 		return nil
 	}
 	if repository, ok := s.connRepository.(ScopedRealDisconnectRepository); ok {
@@ -819,6 +826,7 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 				log.Printf("[cost-guard] full disconnect pause cleanup failed connection_id=%s err=%v", conn.ID, err)
 			}
 		}
+		s.notifyRealConnectionsChanged(ctx, userID, adminAccountID)
 		return nil
 	}
 	if removePricing {
@@ -830,6 +838,7 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 				log.Printf("[cost-guard] full disconnect pause cleanup failed connection_id=%s err=%v", conn.ID, err)
 			}
 		}
+		s.notifyRealConnectionsChanged(ctx, userID, adminAccountID)
 		return nil
 	}
 	if err := s.connRepository.DeleteRealConnection(ctx, req.ConnectionID, userID, adminAccountID); err != nil {
@@ -840,6 +849,7 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 			log.Printf("[cost-guard] unlink pause cleanup failed connection_id=%s err=%v", conn.ID, err)
 		}
 	}
+	s.notifyRealConnectionsChanged(ctx, userID, adminAccountID)
 	return nil
 }
 

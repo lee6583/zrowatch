@@ -30,14 +30,15 @@ const (
 )
 
 type GroupRateMonitorSettings struct {
-	UserID               string    `json:"-"`
-	AdminAccountID       string    `json:"-"`
-	Enabled              bool      `json:"enabled"`
-	CostGuardEnabled     bool      `json:"costGuardEnabled"`
-	ProbeIntervalSeconds int       `json:"probeIntervalSeconds"`
-	FailureThreshold     int       `json:"failureThreshold"`
-	DefaultModel         string    `json:"defaultModel"`
-	UpdatedAt            time.Time `json:"updatedAt"`
+	UserID                string    `json:"-"`
+	AdminAccountID        string    `json:"-"`
+	Enabled               bool      `json:"enabled"`
+	CostGuardEnabled      bool      `json:"costGuardEnabled"`
+	ProfitPriorityEnabled bool      `json:"profitPriorityEnabled"`
+	ProbeIntervalSeconds  int       `json:"probeIntervalSeconds"`
+	FailureThreshold      int       `json:"failureThreshold"`
+	DefaultModel          string    `json:"defaultModel"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 type GroupRateMonitorOverride struct {
@@ -87,24 +88,26 @@ type GroupRateMonitorRestoreSummary struct {
 }
 
 type GroupRateMonitorSettingsView struct {
-	Enabled              bool                           `json:"enabled"`
-	CostGuardEnabled     bool                           `json:"costGuardEnabled"`
-	ProbeIntervalSeconds int                            `json:"probeIntervalSeconds"`
-	FailureThreshold     int                            `json:"failureThreshold"`
-	DefaultModel         string                         `json:"defaultModel"`
-	TypeDefaults         []GroupRateMonitorTypeDefault  `json:"typeDefaults"`
-	Groups               []GroupRateMonitorGroupConfig  `json:"groups"`
-	Restore              GroupRateMonitorRestoreSummary `json:"restore"`
+	Enabled               bool                           `json:"enabled"`
+	CostGuardEnabled      bool                           `json:"costGuardEnabled"`
+	ProfitPriorityEnabled bool                           `json:"profitPriorityEnabled"`
+	ProbeIntervalSeconds  int                            `json:"probeIntervalSeconds"`
+	FailureThreshold      int                            `json:"failureThreshold"`
+	DefaultModel          string                         `json:"defaultModel"`
+	TypeDefaults          []GroupRateMonitorTypeDefault  `json:"typeDefaults"`
+	Groups                []GroupRateMonitorGroupConfig  `json:"groups"`
+	Restore               GroupRateMonitorRestoreSummary `json:"restore"`
 }
 
 type GroupRateMonitorSettingsInput struct {
-	Enabled              bool                          `json:"enabled"`
-	CostGuardEnabled     bool                          `json:"costGuardEnabled"`
-	ProbeIntervalSeconds int                           `json:"probeIntervalSeconds"`
-	FailureThreshold     int                           `json:"failureThreshold"`
-	DefaultModel         string                        `json:"defaultModel"`
-	TypeDefaults         []GroupRateMonitorTypeDefault `json:"typeDefaults"`
-	Overrides            []GroupRateMonitorOverride    `json:"overrides"`
+	Enabled               bool                          `json:"enabled"`
+	CostGuardEnabled      bool                          `json:"costGuardEnabled"`
+	ProfitPriorityEnabled bool                          `json:"profitPriorityEnabled"`
+	ProbeIntervalSeconds  int                           `json:"probeIntervalSeconds"`
+	FailureThreshold      int                           `json:"failureThreshold"`
+	DefaultModel          string                        `json:"defaultModel"`
+	TypeDefaults          []GroupRateMonitorTypeDefault `json:"typeDefaults"`
+	Overrides             []GroupRateMonitorOverride    `json:"overrides"`
 }
 
 type GroupRateMonitorTargetState struct {
@@ -129,6 +132,10 @@ type GroupRateMonitorTargetState struct {
 }
 
 type GroupRateMonitorCostGuardInput struct {
+	Enabled bool `json:"enabled"`
+}
+
+type GroupRateMonitorProfitPriorityInput struct {
 	Enabled bool `json:"enabled"`
 }
 
@@ -488,8 +495,9 @@ func (s *Service) buildGroupRateMonitorSettingsView(_ context.Context, settings 
 		})
 	}
 	return GroupRateMonitorSettingsView{
-		Enabled: settings.Enabled, CostGuardEnabled: settings.CostGuardEnabled, ProbeIntervalSeconds: settings.ProbeIntervalSeconds,
-		FailureThreshold: settings.FailureThreshold, DefaultModel: settings.DefaultModel,
+		Enabled: settings.Enabled, CostGuardEnabled: settings.CostGuardEnabled, ProfitPriorityEnabled: settings.ProfitPriorityEnabled,
+		ProbeIntervalSeconds: settings.ProbeIntervalSeconds,
+		FailureThreshold:     settings.FailureThreshold, DefaultModel: settings.DefaultModel,
 		TypeDefaults: typeViews, Groups: groupViews,
 	}
 }
@@ -579,7 +587,8 @@ func (s *Service) SaveGroupRateMonitorSettings(ctx context.Context, userID strin
 			ProbeIntervalSeconds: item.ProbeIntervalSeconds, FailureThreshold: item.FailureThreshold})
 	}
 	settings := GroupRateMonitorSettings{UserID: userID, AdminAccountID: adminAccountID, Enabled: input.Enabled, CostGuardEnabled: input.CostGuardEnabled,
-		ProbeIntervalSeconds: input.ProbeIntervalSeconds, FailureThreshold: input.FailureThreshold,
+		ProfitPriorityEnabled: input.ProfitPriorityEnabled,
+		ProbeIntervalSeconds:  input.ProbeIntervalSeconds, FailureThreshold: input.FailureThreshold,
 		DefaultModel: strings.TrimSpace(input.DefaultModel)}
 	if err := repo.SaveGroupRateMonitorSettings(ctx, settings, typeDefaults, overrides); err != nil {
 		return GroupRateMonitorSettingsView{}, err
@@ -848,6 +857,9 @@ func (s *Service) runGroupRateProbeCycle(ctx context.Context, settings GroupRate
 	dispatch := s.reconcileGroupRateMonitorAccounts(ctx, repo, settings, session, group, detail, actionMode)
 	if err := repo.InsertGroupRateMonitorCycle(ctx, cycle); err != nil {
 		return GroupRateProbeCycle{}, nil, err
+	}
+	if settings.ProfitPriorityEnabled {
+		_, _ = s.reconcileProfitPriorityWorkspace(ctx, settings.UserID, settings.AdminAccountID, true)
 	}
 	return cycle, dispatch, nil
 }

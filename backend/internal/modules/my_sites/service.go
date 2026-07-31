@@ -113,12 +113,13 @@ type GroupRateCostGuardResult struct {
 // Service 负责分组映射的查询与保存，以及真实对接的编排。
 // 供仪表盘分组弹窗和分组倍率页面复用。
 type Service struct {
-	repository      StateRepository
-	connRepository  RealConnectionRepository
-	platformService *upstream.PlatformService
-	upstreamLookup  UpstreamSiteLookup
-	botNotifier     BotNotifier
-	accounts        AdminAccountResolver
+	repository               StateRepository
+	connRepository           RealConnectionRepository
+	platformService          *upstream.PlatformService
+	upstreamLookup           UpstreamSiteLookup
+	botNotifier              BotNotifier
+	accounts                 AdminAccountResolver
+	onRealConnectionsChanged func(context.Context, string, string)
 }
 
 type AdminAccountResolver interface {
@@ -127,6 +128,25 @@ type AdminAccountResolver interface {
 
 func NewService(repository StateRepository, platformService *upstream.PlatformService, upstreamLookup UpstreamSiteLookup) *Service {
 	return &Service{repository: repository, platformService: platformService, upstreamLookup: upstreamLookup}
+}
+
+func (s *Service) SetRealConnectionsChangedHook(hook func(context.Context, string, string)) {
+	s.onRealConnectionsChanged = hook
+}
+
+func (s *Service) notifyRealConnectionsChanged(ctx context.Context, userID, adminAccountID string) {
+	if s.onRealConnectionsChanged == nil {
+		return
+	}
+	hook := s.onRealConnectionsChanged
+	go func() {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				log.Printf("[real-connections] change hook panic recovered: %v", recovered)
+			}
+		}()
+		hook(context.WithoutCancel(ctx), userID, adminAccountID)
+	}()
 }
 
 func (s *Service) EnsureSchema(ctx context.Context) error {

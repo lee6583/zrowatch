@@ -89,6 +89,7 @@ func (s *Service) reconcileSub2APIRealConnectionGroups(
 	for _, remote := range remoteAccounts {
 		remoteByAccountID[remote.accountID] = remote
 	}
+	changed := false
 	for index := range connections {
 		conn := connections[index]
 		if !isSub2APIReconcilableConnection(conn) {
@@ -118,7 +119,11 @@ func (s *Service) reconcileSub2APIRealConnectionGroups(
 		}
 		connections[index].OwnGroupIDs = desiredIDs
 		connections[index].OwnGroupNames = desiredNames
+		changed = true
 		log.Printf("[real-connection-reconcile] updated connection_id=%s account_id=%s old_groups=%v new_groups=%v", conn.ID, conn.AdminAccountID, conn.OwnGroupIDs, desiredIDs)
+	}
+	if changed {
+		s.notifyRealConnectionsChanged(ctx, userID, adminAccountID)
 	}
 	return connections
 }

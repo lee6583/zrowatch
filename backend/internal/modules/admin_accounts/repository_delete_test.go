@@ -27,6 +27,7 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"connection_health_group_rate_monitor_states",
 		"connection_health_group_rate_monitor_overrides",
 		"connection_health_group_rate_monitor_settings",
+		"connection_health_profit_priority_states",
 		"connection_health_target_action_states",
 		"connection_health_probe_budget_usage",
 		"connection_health_priority_sync_states",

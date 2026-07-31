@@ -112,6 +112,22 @@ export const updateGroupRateMonitorCostGuard = async (enabled: boolean): Promise
     body: JSON.stringify({ enabled }),
   })
 
+export interface ProfitPriorityUpdateSummary {
+  enabled: boolean
+  updated: number
+  unchanged: number
+  skipped: number
+  failed: number
+  restored: number
+  conflict: number
+}
+
+export const updateGroupRateMonitorProfitPriority = async (enabled: boolean): Promise<ProfitPriorityUpdateSummary> =>
+  requestJson<ProfitPriorityUpdateSummary>('/connection-health/group-rate-monitor/profit-priority', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
+
 export const getGroupRateMonitorSummaries = async (): Promise<GroupRateMonitorSummary[]> =>
   requestJson<GroupRateMonitorSummary[]>('/connection-health/group-rate-monitor/summaries')
 

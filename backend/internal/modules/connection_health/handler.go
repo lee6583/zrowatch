@@ -25,6 +25,7 @@ func RegisterRoutes(mux *http.ServeMux, service *Service) {
 	mux.HandleFunc("GET /api/connection-health/group-rate-monitor/settings", handler.groupRateMonitorSettings)
 	mux.HandleFunc("PUT /api/connection-health/group-rate-monitor/settings", handler.putGroupRateMonitorSettings)
 	mux.HandleFunc("PUT /api/connection-health/group-rate-monitor/cost-guard", handler.putGroupRateMonitorCostGuard)
+	mux.HandleFunc("PUT /api/connection-health/group-rate-monitor/profit-priority", handler.putGroupRateMonitorProfitPriority)
 	mux.HandleFunc("GET /api/connection-health/group-rate-monitor/summaries", handler.groupRateMonitorSummaries)
 	mux.HandleFunc("POST /api/connection-health/group-rate-monitor/probe", handler.probeGroupRateMonitor)
 	mux.HandleFunc("GET /api/connection-health/events", handler.events)
@@ -91,6 +92,25 @@ func (h *Handler) putGroupRateMonitorCostGuard(w http.ResponseWriter, r *http.Re
 		return
 	}
 	result, err := h.service.SetGroupRateMonitorCostGuard(r.Context(), userID, input.Enabled)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, result)
+}
+
+func (h *Handler) putGroupRateMonitorProfitPriority(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var input GroupRateMonitorProfitPriorityInput
+	if err := httpjson.Decode(r, &input); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, ErrorRequest)
+		return
+	}
+	result, err := h.service.SetGroupRateMonitorProfitPriority(r.Context(), userID, input.Enabled)
 	if err != nil {
 		writeError(w, err)
 		return

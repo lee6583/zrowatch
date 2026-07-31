@@ -112,7 +112,9 @@ export default {
       switchWorkspace: 'Switch Workspace',
       skipToContent: 'Skip to main content',
       openNavigation: 'Open navigation',
-      closeNavigation: 'Close navigation'
+      closeNavigation: 'Close navigation',
+      collapseNavigation: 'Collapse navigation',
+      expandNavigation: 'Expand navigation'
     },
     menu: {
       dashboard: 'Dashboard',
@@ -1317,6 +1319,14 @@ export default {
           allConnectedGroupTypes: 'All Connected Types',
           connectedGroupType: 'Connected type filter'
         },
+        sort: {
+          label: 'Site sorting',
+          default: 'Default order',
+          balanceDesc: 'Balance high to low',
+          balanceAsc: 'Balance low to high',
+          historyRechargeDesc: 'Recharge high to low',
+          historyRechargeAsc: 'Recharge low to high'
+        },
         addSite: 'Add Site',
         summary: '{connected} / {total} upstream sites connected',
         refresh: {
@@ -1593,6 +1603,7 @@ export default {
           title: 'Probe Settings',
           description: 'Probe each upstream group with its site URL and API key, then stop its bound downstream Sub2API accounts after consecutive failures.',
           costGuard: 'Cost Guard',
+          profitPriority: 'Profit Priority',
           loading: 'Loading probe settings...',
           enabled: 'Enable automatic probing',
           enabledHint: 'Current and future connected upstream groups are probed automatically with their own site URL and API key.',

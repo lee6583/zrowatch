@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { useRouter } from 'vue-router'
-import { AlertCircle, ArrowUpDown, Check, History, KeyRound, Link2, Loader2, Megaphone, Pencil, RefreshCw, Search, ServerCog, Settings2, Sparkles, Trash2, X, Zap } from 'lucide-vue-next'
+import { AlertCircle, ArrowUpDown, Check, History, KeyRound, Link2, Loader2, Pencil, RefreshCw, Search, ServerCog, Settings2, Sparkles, Trash2, X, Zap } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Tooltip } from '@/components/ui/tooltip'
 import { getMySiteMappingOptions, realConnect, realBind, listAdminResources, listUpstreamKeys, listRealConnections, realDisconnect, updateRealConnectionGroups } from '../api/mySites'
 import { getDashboardAdminStatus } from '../api/dashboardAdmin'
-import { getBoundDispatchAccounts, getGroupRateMonitorSettings, getGroupRateMonitorSummaries, probeGroupRateMonitor, saveGroupRateMonitorSettings, updateGroupRateMonitorCostGuard, updateTargetDispatch, updateTargetPriority } from '../api/connectionHealth'
+import { getBoundDispatchAccounts, getGroupRateMonitorSettings, getGroupRateMonitorSummaries, probeGroupRateMonitor, saveGroupRateMonitorSettings, updateGroupRateMonitorCostGuard, updateGroupRateMonitorProfitPriority, updateTargetDispatch, updateTargetPriority } from '../api/connectionHealth'
 import { listUpstreamSites, syncAllUpstreamSites } from '../api/upstream'
 import { useGroupRates } from '../composables/useGroupRates'
 import type { GroupRate, GroupRateHistoryRow } from '../types/groupRates'
@@ -19,7 +18,6 @@ import type { UpstreamSiteResponse } from '../types/upstream'
 import { LEGACY_NEW_API_CHANNEL_SUGGESTIONS, NEW_API_CHANNEL_TYPES } from '../types/mySites'
 
 const { t, locale } = useI18n()
-const router = useRouter()
 
 const {
   rates,
@@ -95,6 +93,7 @@ const isLoadingHealthSettings = ref(false)
 const isLoadingHealthSettingsSnapshot = ref(false)
 const isSavingHealthSettings = ref(false)
 const isTogglingCostGuard = ref(false)
+const isTogglingProfitPriority = ref(false)
 const healthSettingsErrorKey = ref('')
 const healthSettingsDraft = ref<GroupRateMonitorSettings | null>(null)
 const healthSettingsGroupType = ref('')
@@ -591,6 +590,7 @@ const cloneHealthSettings = (settings: GroupRateMonitorSettings): GroupRateMonit
 const buildHealthSettingsInput = (settings: GroupRateMonitorSettings) => ({
   enabled: settings.enabled,
   costGuardEnabled: settings.costGuardEnabled,
+  profitPriorityEnabled: settings.profitPriorityEnabled,
   probeIntervalSeconds: Number(settings.probeIntervalSeconds),
   failureThreshold: Number(settings.failureThreshold),
   defaultModel: settings.defaultModel.trim(),
@@ -663,6 +663,31 @@ const toggleCostGuardEnabled = async () => {
     healthSummaryErrorKey.value = errorKey
   } finally {
     isTogglingCostGuard.value = false
+  }
+}
+
+const toggleProfitPriorityEnabled = async () => {
+  if (isLoadingHealthSettingsSnapshot.value || isTogglingProfitPriority.value) return
+  isTogglingProfitPriority.value = true
+  healthSettingsErrorKey.value = ''
+  healthSummaryErrorKey.value = ''
+  try {
+    const settings = await loadHealthSettingsSnapshot()
+    const result = await updateGroupRateMonitorProfitPriority(!settings.profitPriorityEnabled)
+    healthSettingsSnapshot.value = cloneHealthSettings({
+      ...settings,
+      profitPriorityEnabled: result.enabled,
+    })
+    if (healthSettingsDraft.value) {
+      healthSettingsDraft.value.profitPriorityEnabled = result.enabled
+    }
+    await loadDispatchAccounts()
+  } catch (error) {
+    const errorKey = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsSaveFailed'
+    healthSettingsErrorKey.value = errorKey
+    healthSummaryErrorKey.value = errorKey
+  } finally {
+    isTogglingProfitPriority.value = false
   }
 }
 
@@ -1598,7 +1623,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
       </div>
 
-      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto', statusFilter === 'mapped' ? 'sm:grid-cols-4' : 'sm:grid-cols-2']">
+      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto', statusFilter === 'mapped' ? 'sm:grid-cols-2 xl:grid-cols-4' : 'sm:grid-cols-1']">
         <button
           v-if="statusFilter === 'mapped'"
           type="button"
@@ -1631,13 +1656,41 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             />
           </span>
         </button>
+        <button
+          v-if="statusFilter === 'mapped'"
+          type="button"
+          role="switch"
+          :aria-checked="healthSettingsSnapshot?.profitPriorityEnabled ?? false"
+          :disabled="isLoadingHealthSettingsSnapshot || isTogglingProfitPriority || isSavingHealthSettings"
+          :class="[
+            'inline-flex h-11 items-center justify-between gap-3 rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+            (healthSettingsSnapshot?.profitPriorityEnabled ?? false)
+              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+              : 'border-border/60 bg-surface text-muted-foreground hover:border-primary/40 hover:text-foreground',
+            isLoadingHealthSettingsSnapshot || isTogglingProfitPriority || isSavingHealthSettings ? 'cursor-wait opacity-70' : 'cursor-pointer',
+          ]"
+          @click="toggleProfitPriorityEnabled"
+        >
+          <span class="whitespace-nowrap">{{ t('admin.groupRates.health.settings.profitPriority') }}</span>
+          <span
+            :class="[
+              'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full border transition-colors',
+              healthSettingsSnapshot?.profitPriorityEnabled ? 'border-emerald-500/40 bg-emerald-500' : 'border-border/70 bg-muted',
+            ]"
+          >
+            <Loader2 v-if="isLoadingHealthSettingsSnapshot || isTogglingProfitPriority" class="absolute left-1.5 h-3.5 w-3.5 animate-spin text-white" />
+            <span
+              v-else
+              :class="[
+                'h-4 w-4 rounded-full bg-white shadow-sm transition-transform',
+                healthSettingsSnapshot?.profitPriorityEnabled ? 'translate-x-5' : 'translate-x-1',
+              ]"
+            />
+          </span>
+        </button>
         <Button v-if="statusFilter === 'mapped'" variant="secondary" class="h-11 gap-2" @click="openHealthSettings">
           <Settings2 class="h-4 w-4" />
           {{ t('admin.groupRates.health.settings.action') }}
-        </Button>
-        <Button variant="secondary" class="h-11 gap-2" @click="router.push('/admin/group-rate-campaigns?action=create')">
-          <Megaphone class="h-4 w-4" />
-          {{ t('admin.groupRates.actions.createCampaign') }}
         </Button>
         <Button class="h-11 gap-2 shadow-sm" :disabled="isLoading || isSyncingUpstream" @click="refreshGroupRates">
           <Loader2 v-if="isLoading || isSyncingUpstream" class="h-4 w-4 animate-spin" />

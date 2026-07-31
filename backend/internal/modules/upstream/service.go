@@ -794,6 +794,9 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 
 	// 在覆盖前保存旧指标，用于同步后的预警检测。
 	oldMetrics := site.Metrics
+	if refreshErr == nil && refreshedSession.Platform == PlatformSub2API {
+		metrics = preserveConfirmedSub2APIGroupRates(oldMetrics, metrics)
+	}
 
 	if refreshErr != nil {
 		if wasBalanceSuspended || site.BalanceSuspended {
@@ -833,6 +836,55 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 		}
 	}
 	return response, nil
+}
+
+// preserveConfirmedSub2APIGroupRates prevents a transient /groups/rates
+// failure from replacing the user's effective rate with the public default.
+// The rest of the metrics remain fresh so balance monitoring can continue.
+func preserveConfirmedSub2APIGroupRates(previous, current Metrics) Metrics {
+	previousByID := make(map[string]GroupInfo, len(previous.Groups))
+	previousByName := make(map[string]GroupInfo, len(previous.Groups))
+	for _, group := range previous.Groups {
+		if id := strings.TrimSpace(group.ID); id != "" {
+			previousByID[id] = group
+		}
+		if name := strings.TrimSpace(group.Name); name != "" {
+			previousByName[name] = group
+		}
+	}
+
+	for i := range current.Groups {
+		group := &current.Groups[i]
+		if !group.EffectiveMultiplierUnverified {
+			continue
+		}
+		confirmed, ok := previousByID[strings.TrimSpace(group.ID)]
+		if !ok {
+			confirmed, ok = previousByName[strings.TrimSpace(group.Name)]
+		}
+		if !ok || confirmed.EffectiveMultiplierUnverified || confirmed.Multiplier == nil {
+			group.Multiplier = nil
+			group.MultiplierDisplay = defaultDisplay
+			group.DedicatedMultiplier = nil
+			group.DedicatedMultiplierDisplay = ""
+			group.HasDedicatedMultiplier = false
+			continue
+		}
+
+		rate := *confirmed.Multiplier
+		group.Multiplier = &rate
+		group.MultiplierDisplay = confirmed.MultiplierDisplay
+		group.HasDedicatedMultiplier = confirmed.HasDedicatedMultiplier
+		if confirmed.DedicatedMultiplier != nil {
+			dedicatedRate := *confirmed.DedicatedMultiplier
+			group.DedicatedMultiplier = &dedicatedRate
+			group.DedicatedMultiplierDisplay = confirmed.DedicatedMultiplierDisplay
+		}
+	}
+	if len(current.Groups) > 0 {
+		current.Group = current.Groups[0]
+	}
+	return current
 }
 
 func (s *Service) saveSnapshot(ctx context.Context, site *Site) {

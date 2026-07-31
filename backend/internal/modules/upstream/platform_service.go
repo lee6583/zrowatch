@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -468,6 +469,126 @@ func (s *PlatformService) FetchSub2APIAdminAccountUsageStats(session Session, ac
 	return *cost, nil
 }
 
+// Sub2APIAccountRuntimeSample is a non-sensitive request outcome used by the
+// downstream priority controller. The usage API only returns completed usage
+// rows, so failures that never produced a row are supplied by ZroWatch probes.
+type Sub2APIAccountRuntimeSample struct {
+	Success   bool
+	LatencyMs *int
+	CreatedAt time.Time
+}
+
+// FetchSub2APIAdminAccountRuntimeSamples returns the newest completed text
+// requests for one account. It intentionally omits prompts, models, users and
+// costs so no request-level sensitive data leaves PlatformService.
+func (s *PlatformService) FetchSub2APIAdminAccountRuntimeSamples(session Session, accountID string, since time.Time, limit int) ([]Sub2APIAccountRuntimeSample, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
+		return nil, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	accountID = strings.TrimSpace(accountID)
+	if accountID == "" {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	if _, err := strconv.ParseInt(accountID, 10, 64); err != nil {
+		return nil, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	startDate := since.In(apptimezone.Location()).Format("2006-01-02")
+	endDate := time.Now().In(apptimezone.Location()).Format("2006-01-02")
+	requestURL := session.BaseURL + "/api/v1/admin/usage?page=1&page_size=100&sort_by=created_at&sort_order=desc" +
+		"&account_id=" + url.QueryEscape(accountID) + "&start_date=" + url.QueryEscape(startDate) +
+		"&end_date=" + url.QueryEscape(endDate) + "&timezone=Asia%2FShanghai"
+	response, err := s.httpClient.requestJSON(requestURL, adminAuthOptions(session))
+	if err != nil {
+		return nil, err
+	}
+	result := make([]Sub2APIAccountRuntimeSample, 0, limit)
+	for _, item := range dataArray(response.Payload) {
+		createdAt := parseFlexibleTime(firstAny(item, []string{"created_at", "createdAt"}))
+		if createdAt == nil || createdAt.Before(since) {
+			continue
+		}
+		record := dataRecord(item)
+		firstToken := firstInt(record, []string{"first_token_ms", "firstTokenMs"})
+		outputTokens := firstNumber(item, []string{"output_tokens", "outputTokens"})
+		success, attributable := sub2APIAccountRuntimeOutcome(record, firstToken, outputTokens)
+		if !attributable {
+			continue
+		}
+		result = append(result, Sub2APIAccountRuntimeSample{Success: success, LatencyMs: firstToken, CreatedAt: *createdAt})
+		if len(result) == limit {
+			break
+		}
+	}
+
+	// Successful usage rows and failed upstream requests live in separate
+	// Sub2API APIs. Merge both streams before taking the newest sample window.
+	errorURL := session.BaseURL + "/api/v1/admin/ops/upstream-errors?page=1&page_size=" + strconv.Itoa(limit) +
+		"&sort_by=created_at&sort_order=desc&view=all&account_id=" + url.QueryEscape(accountID) +
+		"&start_time=" + url.QueryEscape(since.UTC().Format(time.RFC3339Nano)) +
+		"&end_time=" + url.QueryEscape(time.Now().UTC().Format(time.RFC3339Nano))
+	if errorResponse, errorRequestErr := s.httpClient.requestJSON(errorURL, adminAuthOptions(session)); errorRequestErr == nil {
+		for _, item := range dataArray(errorResponse.Payload) {
+			record := dataRecord(item)
+			createdAt := parseFlexibleTime(firstAny(record, []string{"created_at", "createdAt"}))
+			if createdAt == nil || createdAt.Before(since) || !sub2APIUpstreamErrorAttributable(record) {
+				continue
+			}
+			result = append(result, Sub2APIAccountRuntimeSample{Success: false, CreatedAt: *createdAt})
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
+	if len(result) > limit {
+		result = result[:limit]
+	}
+	return result, nil
+}
+
+func sub2APIUpstreamErrorAttributable(record map[string]any) bool {
+	if status := firstInt(record, []string{"upstream_status_code", "upstreamStatusCode", "status_code", "statusCode"}); status != nil && *status != 0 {
+		return *status == http.StatusUnauthorized || *status == http.StatusForbidden || *status == http.StatusRequestTimeout ||
+			*status == http.StatusTooManyRequests || *status >= 500
+	}
+	phase := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"phase", "error_phase", "errorPhase"})))
+	owner := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"error_owner", "errorOwner"})))
+	typeName := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"type", "error_type", "errorType"})))
+	if phase == "account_auth" || phase == "upstream" || owner == "provider" {
+		return true
+	}
+	for _, marker := range []string{"timeout", "rate_limit", "rate-limit", "auth", "network", "server", "transport", "credential"} {
+		if strings.Contains(typeName, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func sub2APIAccountRuntimeOutcome(record map[string]any, firstToken *int, outputTokens *float64) (success bool, attributable bool) {
+	if status := firstInt(record, []string{"status_code", "statusCode"}); status != nil {
+		if *status >= 200 && *status < 400 {
+			return true, true
+		}
+		if *status == http.StatusUnauthorized || *status == http.StatusForbidden || *status == http.StatusRequestTimeout ||
+			*status == http.StatusTooManyRequests || *status >= 500 {
+			return false, true
+		}
+		return false, false
+	}
+	errorPhase := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"error_phase", "errorPhase"})))
+	errorCategory := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"error_category", "errorCategory"})))
+	for _, marker := range []string{"upstream", "account", "transport", "timeout", "rate_limit", "auth", "server"} {
+		if strings.Contains(errorPhase, marker) || strings.Contains(errorCategory, marker) {
+			return false, true
+		}
+	}
+	if firstToken != nil || (outputTokens != nil && *outputTokens > 0) {
+		return true, true
+	}
+	return false, false
+}
+
 // FetchSub2APIAdminSiteBalance 使用默认过滤规则（排除 admin 角色）统计站点用户总余额。
 // my_sites 模块调用此方法时无需关心自定义筛选条件。
 func (s *PlatformService) FetchSub2APIAdminSiteBalance(session Session) (AdminSiteBalance, error) {
@@ -648,14 +769,15 @@ func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) 
 		}
 
 		group := GroupInfo{
-			ID:                       id,
-			Name:                     name,
-			Platform:                 platform,
-			ClaudeCodeOnly:           claudeCodeOnly,
-			Multiplier:               defaultRate,
-			MultiplierDisplay:        multiplier(defaultRate),
-			DefaultMultiplier:        defaultRate,
-			DefaultMultiplierDisplay: multiplier(defaultRate),
+			ID:                            id,
+			Name:                          name,
+			Platform:                      platform,
+			ClaudeCodeOnly:                claudeCodeOnly,
+			Multiplier:                    defaultRate,
+			MultiplierDisplay:             multiplier(defaultRate),
+			DefaultMultiplier:             defaultRate,
+			DefaultMultiplierDisplay:      multiplier(defaultRate),
+			EffectiveMultiplierUnverified: ratesErr != nil,
 		}
 
 		if dedicatedRate, ok := rateOverrides[id]; ok && id != "" {

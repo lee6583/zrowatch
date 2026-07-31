@@ -229,6 +229,7 @@ export interface GroupRateMonitorRestoreSummary {
 export interface GroupRateMonitorSettings {
   enabled: boolean
   costGuardEnabled: boolean
+  profitPriorityEnabled: boolean
   probeIntervalSeconds: number
   failureThreshold: number
   defaultModel: string
@@ -263,6 +264,7 @@ export interface GroupRateMonitorGroupConfig {
 export interface GroupRateMonitorSettingsInput {
   enabled: boolean
   costGuardEnabled: boolean
+  profitPriorityEnabled: boolean
   probeIntervalSeconds: number
   failureThreshold: number
   defaultModel: string

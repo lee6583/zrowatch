@@ -57,34 +57,41 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo              healthRepository
-	mySites           MySitesReader
-	sites             SiteLookup
-	accounts          AdminAccountResolver
-	dispatcher        RemoteActionRunner
-	probeRunner       *RealProbeRunner
-	modelDiscovery    *ModelDiscoveryRunner
-	platformGroups    PlatformGroupReader
-	priorityActions   TargetPriorityActioner
-	schedulingActions AccountSchedulingActioner
-	dispatchActions   AccountDispatchActioner
-	dispatchStates    AccountDispatchStateReader
-	balancePauses     BalancePauseLookup
+	repo               healthRepository
+	mySites            MySitesReader
+	sites              SiteLookup
+	accounts           AdminAccountResolver
+	dispatcher         RemoteActionRunner
+	probeRunner        *RealProbeRunner
+	modelDiscovery     *ModelDiscoveryRunner
+	platformGroups     PlatformGroupReader
+	priorityActions    TargetPriorityActioner
+	profitActions      ProfitPriorityActioner
+	schedulingActions  AccountSchedulingActioner
+	dispatchActions    AccountDispatchActioner
+	dispatchStates     AccountDispatchStateReader
+	balancePauses      BalancePauseLookup
+	profitPriorityMu   sync.Mutex
+	profitRuntimeCache map[string]profitRuntimeCacheEntry
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
 	service := &Service{
-		repo:           repo,
-		mySites:        mySites,
-		sites:          sites,
-		dispatcher:     newRemoteActionDispatcher(sites, mySites, platform),
-		probeRunner:    NewRealProbeRunner(),
-		modelDiscovery: NewModelDiscoveryRunner(),
+		repo:               repo,
+		mySites:            mySites,
+		sites:              sites,
+		dispatcher:         newRemoteActionDispatcher(sites, mySites, platform),
+		probeRunner:        NewRealProbeRunner(),
+		modelDiscovery:     NewModelDiscoveryRunner(),
+		profitRuntimeCache: make(map[string]profitRuntimeCacheEntry),
 	}
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会
 	// 安全跳过远端写入，不影响既有探活/降级流程。
 	if actions, ok := platform.(TargetPriorityActioner); ok {
 		service.priorityActions = actions
+	}
+	if actions, ok := platform.(ProfitPriorityActioner); ok {
+		service.profitActions = actions
 	}
 	if actions, ok := platform.(AccountSchedulingActioner); ok {
 		service.schedulingActions = actions

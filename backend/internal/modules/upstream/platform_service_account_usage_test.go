@@ -1,9 +1,11 @@
 package upstream
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestFetchSub2APIAdminAccountUsageStats(t *testing.T) {
@@ -49,6 +51,93 @@ func TestFetchSub2APIAdminAccountUsageStats(t *testing.T) {
 	}
 	if amount != 128.56 {
 		t.Fatalf("amount = %.2f, want 128.56", amount)
+	}
+}
+
+func TestFetchSub2APIAdminAccountRuntimeSamples(t *testing.T) {
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/admin/usage":
+			if r.URL.Query().Get("account_id") != "42" {
+				t.Fatalf("account_id = %q", r.URL.Query().Get("account_id"))
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"items": []map[string]any{
+				{"created_at": now.Format(time.RFC3339), "first_token_ms": 1250, "output_tokens": 1},
+				{"created_at": now.Add(-time.Minute).Format(time.RFC3339), "first_token_ms": 800, "output_tokens": 1},
+				{"created_at": now.Add(-48 * time.Hour).Format(time.RFC3339), "first_token_ms": 100, "output_tokens": 1},
+			}}})
+		case "/api/v1/admin/ops/upstream-errors":
+			if r.URL.Query().Get("account_id") != "42" || r.URL.Query().Get("start_time") == "" {
+				t.Fatalf("unexpected upstream error filters: %s", r.URL.RawQuery)
+			}
+			writeJSON(w, map[string]any{"data": map[string]any{"items": []map[string]any{
+				{"created_at": now.Add(-30 * time.Second).Format(time.RFC3339), "status_code": 429, "phase": "upstream", "error_owner": "provider"},
+				{"created_at": now.Add(-2 * time.Minute).Format(time.RFC3339), "status_code": 500, "phase": "upstream", "error_owner": "provider"},
+				{"created_at": now.Add(-3 * time.Minute).Format(time.RFC3339), "status_code": 400, "phase": "upstream", "error_owner": "provider"},
+			}}})
+		default:
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "test-token"}
+	samples, err := service.FetchSub2APIAdminAccountRuntimeSamples(session, "42", now.Add(-24*time.Hour), 20)
+	if err != nil {
+		t.Fatalf("FetchSub2APIAdminAccountRuntimeSamples() error = %v", err)
+	}
+	if len(samples) != 4 || samples[0].LatencyMs == nil || *samples[0].LatencyMs != 1250 || samples[1].Success || samples[3].Success {
+		t.Fatalf("unexpected runtime samples: %#v", samples)
+	}
+}
+
+func TestFetchSub2APIAdminAccountRuntimeSamplesFallsBackWhenOpsMonitoringIsUnavailable(t *testing.T) {
+	now := time.Now().UTC()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/admin/ops/upstream-errors" {
+			http.Error(w, "monitoring disabled", http.StatusServiceUnavailable)
+			return
+		}
+		writeJSON(w, map[string]any{"data": map[string]any{"items": []map[string]any{
+			{"created_at": now.Format(time.RFC3339), "first_token_ms": 900, "output_tokens": 1},
+		}}})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "test-token"}
+	samples, err := service.FetchSub2APIAdminAccountRuntimeSamples(session, "42", now.Add(-24*time.Hour), 20)
+	if err != nil || len(samples) != 1 || !samples[0].Success {
+		t.Fatalf("expected successful usage fallback, samples=%#v err=%v", samples, err)
+	}
+}
+
+func TestUpdateSub2APIAdminAccountPrioritySendsPartialPayload(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPut || r.URL.Path != "/api/v1/admin/accounts/42" {
+			t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if len(body) != 1 || body["priority"] != float64(3) {
+			t.Fatalf("priority update must be partial, got %#v", body)
+		}
+		writeJSON(w, map[string]any{"data": map[string]any{"id": 42, "name": "account", "priority": 3}})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "test-token"}
+	state, err := service.UpdateSub2APIAdminAccountPriority(session, "42", 3)
+	if err != nil {
+		t.Fatalf("UpdateSub2APIAdminAccountPriority() error = %v", err)
+	}
+	if state.Priority == nil || *state.Priority != 3 {
+		t.Fatalf("updated priority = %#v", state.Priority)
 	}
 }
 

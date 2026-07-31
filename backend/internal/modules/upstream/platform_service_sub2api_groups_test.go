@@ -184,6 +184,9 @@ func TestFetchSub2APIAdminGroups_RatesUnavailable(t *testing.T) {
 		t.Fatalf("expected 3 groups from available fallback, got %d", len(groups))
 	}
 	for _, g := range groups {
+		if !g.EffectiveMultiplierUnverified {
+			t.Errorf("group %s should mark its effective multiplier unverified", g.Name)
+		}
 		if g.HasDedicatedMultiplier {
 			t.Errorf("group %s should not have dedicated multiplier when rates endpoint is unavailable", g.Name)
 		}

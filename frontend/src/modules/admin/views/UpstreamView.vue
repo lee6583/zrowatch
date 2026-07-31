@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff, CircleHelp } from 'lucide-vue-next'
+import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff, CircleHelp, ArrowUpDown } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -21,7 +21,22 @@ type StoredUpstreamFilters = {
   searchQuery?: string
   platformFilter?: string
   connectedGroupTypeFilter?: string
+  sortMode?: string
 }
+
+type UpstreamSortMode = 'default' | 'balanceDesc' | 'balanceAsc' | 'historyRechargeDesc' | 'historyRechargeAsc'
+
+const upstreamSortModes = new Set<UpstreamSortMode>([
+  'default',
+  'balanceDesc',
+  'balanceAsc',
+  'historyRechargeDesc',
+  'historyRechargeAsc',
+])
+
+const isUpstreamSortMode = (value: unknown): value is UpstreamSortMode => (
+  typeof value === 'string' && upstreamSortModes.has(value as UpstreamSortMode)
+)
 
 const readStoredUpstreamFilters = (): StoredUpstreamFilters => {
   try {
@@ -46,6 +61,7 @@ const storedFilters = readStoredUpstreamFilters()
 const searchQuery = ref(typeof storedFilters.searchQuery === 'string' ? storedFilters.searchQuery : '')
 const platformFilter = ref(typeof storedFilters.platformFilter === 'string' ? storedFilters.platformFilter : '')
 const connectedGroupTypeFilter = ref(typeof storedFilters.connectedGroupTypeFilter === 'string' ? storedFilters.connectedGroupTypeFilter : '')
+const sortMode = ref<UpstreamSortMode>(isUpstreamSortMode(storedFilters.sortMode) ? storedFilters.sortMode : 'default')
 const connectedGroupKeys = ref(new Set<string>())
 const downstreamConsumptionBySite = ref(new Map<string, DownstreamConsumptionItem>())
 const isLoadingDownstreamConsumption = ref(false)
@@ -138,11 +154,12 @@ const createEmptyForm = (): UpstreamSiteForm => ({
 
 const newSiteForm = ref<UpstreamSiteForm>(createEmptyForm())
 
-watch([searchQuery, platformFilter, connectedGroupTypeFilter], () => {
+watch([searchQuery, platformFilter, connectedGroupTypeFilter, sortMode], () => {
   writeStoredUpstreamFilters({
     searchQuery: searchQuery.value,
     platformFilter: platformFilter.value,
     connectedGroupTypeFilter: connectedGroupTypeFilter.value,
+    sortMode: sortMode.value,
   })
 })
 
@@ -237,7 +254,7 @@ const filteredSites = computed(() => {
   const platform = platformFilter.value.toLowerCase()
   const groupType = connectedGroupTypeFilter.value.toLowerCase()
 
-  return upstreamSites.value.filter(site => {
+  const sites = upstreamSites.value.filter(site => {
     const matchesSearch = !keyword
       || site.name.toLowerCase().includes(keyword)
       || site.baseUrl.toLowerCase().includes(keyword)
@@ -246,6 +263,26 @@ const filteredSites = computed(() => {
       group.platform?.toLowerCase() === groupType
     ))
     return matchesSearch && matchesPlatform && matchesGroupType
+  })
+
+  if (sortMode.value === 'default') return sites
+
+  const metric = sortMode.value.startsWith('balance') ? 'balance' : 'historyRecharge'
+  const direction = sortMode.value.endsWith('Asc') ? 1 : -1
+  const sortValue = (site: UpstreamSite): number | null => {
+    const value = site.metrics[metric].value
+    if (value === null || !Number.isFinite(value) || !Number.isFinite(site.rechargeRate) || site.rechargeRate <= 0) return null
+    return value * site.rechargeRate
+  }
+
+  return [...sites].sort((first, second) => {
+    const firstValue = sortValue(first)
+    const secondValue = sortValue(second)
+    if (firstValue === null && secondValue === null) return first.name.localeCompare(second.name, locale.value)
+    if (firstValue === null) return 1
+    if (secondValue === null) return -1
+    const difference = (firstValue - secondValue) * direction
+    return difference || first.name.localeCompare(second.name, locale.value)
   })
 })
 
@@ -498,6 +535,16 @@ onBeforeUnmount(() => {
             <Select v-model="connectedGroupTypeFilter" :aria-label="t('admin.upstream.filters.connectedGroupType')">
               <option value="">{{ t('admin.upstream.filters.allConnectedGroupTypes') }}</option>
               <option v-for="type in connectedGroupTypes" :key="type" :value="type">{{ type }}</option>
+            </Select>
+          </div>
+          <div class="relative w-full sm:w-52 sm:shrink-0">
+            <ArrowUpDown class="pointer-events-none absolute left-3 top-1/2 z-10 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Select v-model="sortMode" class="pl-9" :aria-label="t('admin.upstream.sort.label')">
+              <option value="default">{{ t('admin.upstream.sort.default') }}</option>
+              <option value="balanceDesc">{{ t('admin.upstream.sort.balanceDesc') }}</option>
+              <option value="balanceAsc">{{ t('admin.upstream.sort.balanceAsc') }}</option>
+              <option value="historyRechargeDesc">{{ t('admin.upstream.sort.historyRechargeDesc') }}</option>
+              <option value="historyRechargeAsc">{{ t('admin.upstream.sort.historyRechargeAsc') }}</option>
             </Select>
           </div>
         </div>

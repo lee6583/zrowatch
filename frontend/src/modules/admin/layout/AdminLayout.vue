@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Network, Settings, LogOut, Globe, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes } from 'lucide-vue-next'
+import { LayoutDashboard, Network, Settings, LogOut, Globe, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, PanelLeftClose, PanelLeftOpen } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
@@ -67,6 +67,24 @@ const isWorkspaceSelectionPage = computed(() => route.name === 'AdminAccounts')
 const showUserMenu = ref(false)
 const userMenuRef = ref<HTMLElement | null>(null)
 const isMobileSidebarOpen = ref(false)
+const sidebarCollapsedStorageKey = 'transithub:admin-sidebar-collapsed'
+const readSidebarCollapsed = (): boolean => {
+  try {
+    return window.localStorage.getItem(sidebarCollapsedStorageKey) === 'true'
+  } catch {
+    return false
+  }
+}
+const isSidebarCollapsed = ref(readSidebarCollapsed())
+
+const toggleDesktopSidebar = () => {
+  isSidebarCollapsed.value = !isSidebarCollapsed.value
+  try {
+    window.localStorage.setItem(sidebarCollapsedStorageKey, String(isSidebarCollapsed.value))
+  } catch {
+    // Storage can be unavailable in restricted browser contexts.
+  }
+}
 
 const openMobileSidebar = () => {
   isMobileSidebarOpen.value = true
@@ -220,14 +238,31 @@ watch(
     <aside
       v-if="!isWorkspaceSelectionPage"
       id="admin-mobile-sidebar"
-      class="fixed inset-y-0 left-0 z-50 flex w-64 shrink-0 flex-col border-r border-border/40 bg-surface-elevated transition-transform duration-200 lg:static lg:z-auto lg:translate-x-0 lg:transition-none"
-      :class="isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+      class="fixed inset-y-0 left-0 z-50 flex w-64 shrink-0 flex-col border-r border-border/40 bg-surface-elevated transition-[transform,width] duration-200 lg:static lg:z-auto lg:translate-x-0 lg:transition-[width]"
+      :class="[
+        isMobileSidebarOpen ? 'translate-x-0' : '-translate-x-full',
+        isSidebarCollapsed ? 'lg:w-[4.5rem]' : 'lg:w-64',
+      ]"
     >
-      <div class="h-16 flex items-center justify-between gap-3 px-4 lg:px-6 border-b border-border/40">
-        <div class="flex items-center gap-2">
+      <div
+        class="h-16 flex items-center justify-between gap-3 border-b border-border/40 px-4"
+        :class="isSidebarCollapsed ? 'lg:justify-center lg:px-2' : 'lg:px-6'"
+      >
+        <div class="flex items-center gap-2" :class="isSidebarCollapsed ? 'lg:hidden' : ''">
           <img :src="logoUrl" :alt="t('brand.logoAlt')" width="32" height="32" class="h-8 w-8 shrink-0 object-contain" />
           <span class="text-xl font-bold tracking-tight text-foreground">{{ t('brand.name') }}</span>
         </div>
+        <button
+          type="button"
+          class="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:flex"
+          :title="isSidebarCollapsed ? t('admin.layout.expandNavigation') : t('admin.layout.collapseNavigation')"
+          :aria-label="isSidebarCollapsed ? t('admin.layout.expandNavigation') : t('admin.layout.collapseNavigation')"
+          :aria-expanded="!isSidebarCollapsed"
+          @click="toggleDesktopSidebar"
+        >
+          <PanelLeftOpen v-if="isSidebarCollapsed" class="h-4 w-4" />
+          <PanelLeftClose v-else class="h-4 w-4" />
+        </button>
         <button
           type="button"
           class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-surface-line hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary lg:hidden"
@@ -238,47 +273,72 @@ watch(
         </button>
       </div>
 
-      <nav class="flex-1 py-6 px-4 space-y-2 overflow-y-auto">
+      <nav class="flex-1 space-y-2 overflow-y-auto py-6 px-4" :class="isSidebarCollapsed ? 'lg:px-2' : 'lg:px-4'">
         <template v-for="item in menuItems" :key="item.type === 'leaf' ? item.path : item.id">
           <router-link
             v-if="item.type === 'leaf'"
             :to="item.path"
             class="flex items-center gap-3 rounded-lg px-3 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+            :title="isSidebarCollapsed ? item.name : undefined"
+            :aria-label="isSidebarCollapsed ? item.name : undefined"
             :class="[
               route.path === item.path
                 ? 'bg-primary text-primary-foreground font-medium shadow-md shadow-primary/20'
-                : 'text-muted-foreground hover:bg-surface-line hover:text-foreground'
+                : 'text-muted-foreground hover:bg-surface-line hover:text-foreground',
+              isSidebarCollapsed ? 'lg:justify-center lg:px-2' : '',
             ]"
             @click="handleMenuRouteClick"
           >
-            <component :is="item.icon" class="w-5 h-5" aria-hidden="true" />
-            {{ item.name }}
+            <component :is="item.icon" class="h-5 w-5 shrink-0" aria-hidden="true" />
+            <span :class="isSidebarCollapsed ? 'lg:hidden' : ''">{{ item.name }}</span>
           </router-link>
 
-          <div v-else>
-            <button
-              type="button"
-              class="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
-              :aria-expanded="isGroupExpanded(item)"
-              :aria-controls="`admin-menu-${item.id}`"
-              :class="[
-                isGroupActive(item) && !isGroupExpanded(item)
-                  ? 'bg-primary/10 text-primary font-medium'
-                  : 'text-muted-foreground hover:bg-surface-line hover:text-foreground'
-              ]"
-              @click="toggleGroup(item)"
-            >
-              <component :is="item.icon" class="w-5 h-5" aria-hidden="true" />
-              <span class="flex-1 text-left">{{ item.name }}</span>
-              <ChevronDown class="w-4 h-4 transition-transform" :class="{ 'rotate-180': isGroupExpanded(item) }" aria-hidden="true" />
-            </button>
+          <template v-else>
+            <div :class="isSidebarCollapsed ? 'lg:hidden' : ''">
+              <button
+                type="button"
+                class="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                :aria-expanded="isGroupExpanded(item)"
+                :aria-controls="`admin-menu-${item.id}`"
+                :class="[
+                  isGroupActive(item) && !isGroupExpanded(item)
+                    ? 'bg-primary/10 text-primary font-medium'
+                    : 'text-muted-foreground hover:bg-surface-line hover:text-foreground'
+                ]"
+                @click="toggleGroup(item)"
+              >
+                <component :is="item.icon" class="w-5 h-5" aria-hidden="true" />
+                <span class="flex-1 text-left">{{ item.name }}</span>
+                <ChevronDown class="w-4 h-4 transition-transform" :class="{ 'rotate-180': isGroupExpanded(item) }" aria-hidden="true" />
+              </button>
 
-            <div v-if="isGroupExpanded(item)" :id="`admin-menu-${item.id}`" class="mt-1 ml-4 space-y-1 border-l border-border/40 pl-3">
+              <div v-if="isGroupExpanded(item)" :id="`admin-menu-${item.id}`" class="mt-1 ml-4 space-y-1 border-l border-border/40 pl-3">
+                <router-link
+                  v-for="child in item.children"
+                  :key="child.path"
+                  :to="child.path"
+                  class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                  :class="[
+                    route.path === child.path
+                      ? 'bg-primary text-primary-foreground font-medium shadow-md shadow-primary/20'
+                      : 'text-muted-foreground hover:bg-surface-line hover:text-foreground'
+                  ]"
+                  @click="handleMenuRouteClick"
+                >
+                  <component :is="child.icon" class="w-4 h-4" aria-hidden="true" />
+                  {{ child.name }}
+                </router-link>
+              </div>
+            </div>
+
+            <div v-if="isSidebarCollapsed" class="hidden space-y-1 lg:block">
               <router-link
                 v-for="child in item.children"
                 :key="child.path"
                 :to="child.path"
-                class="flex items-center gap-2.5 rounded-lg px-3 py-2 text-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                class="flex items-center justify-center rounded-lg px-2 py-2.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+                :title="child.name"
+                :aria-label="child.name"
                 :class="[
                   route.path === child.path
                     ? 'bg-primary text-primary-foreground font-medium shadow-md shadow-primary/20'
@@ -286,21 +346,23 @@ watch(
                 ]"
                 @click="handleMenuRouteClick"
               >
-                <component :is="child.icon" class="w-4 h-4" aria-hidden="true" />
-                {{ child.name }}
+                <component :is="child.icon" class="h-5 w-5" aria-hidden="true" />
               </router-link>
             </div>
-          </div>
+          </template>
         </template>
       </nav>
 
-      <div class="p-4 border-t border-border/40">
+      <div class="border-t border-border/40 p-4" :class="isSidebarCollapsed ? 'lg:px-2' : ''">
         <button
           @click="handleLogout"
           class="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-muted-foreground transition-colors hover:bg-surface-line hover:text-red-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary"
+          :class="isSidebarCollapsed ? 'lg:justify-center lg:px-2' : ''"
+          :title="isSidebarCollapsed ? t('admin.menu.signOut') : undefined"
+          :aria-label="isSidebarCollapsed ? t('admin.menu.signOut') : undefined"
         >
-          <LogOut class="w-5 h-5" />
-          {{ t('admin.menu.signOut') }}
+          <LogOut class="h-5 w-5 shrink-0" />
+          <span :class="isSidebarCollapsed ? 'lg:hidden' : ''">{{ t('admin.menu.signOut') }}</span>
         </button>
       </div>
     </aside>

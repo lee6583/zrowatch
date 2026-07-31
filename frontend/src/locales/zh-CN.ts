@@ -112,7 +112,9 @@ export default {
       switchWorkspace: '切换工作区',
       skipToContent: '跳转到主要内容',
       openNavigation: '打开导航',
-      closeNavigation: '关闭导航'
+      closeNavigation: '关闭导航',
+      collapseNavigation: '收起导航',
+      expandNavigation: '展开导航'
     },
     menu: {
       dashboard: '仪表盘',
@@ -1317,6 +1319,14 @@ export default {
           allConnectedGroupTypes: '全部已对接类型',
           connectedGroupType: '已对接类型筛选'
         },
+        sort: {
+          label: '站点排序',
+          default: '默认排序',
+          balanceDesc: '余额从高到低',
+          balanceAsc: '余额从低到高',
+          historyRechargeDesc: '历史充值从高到低',
+          historyRechargeAsc: '历史充值从低到高'
+        },
         addSite: '新增站点',
         summary: '已连接 {connected} / {total} 个上游站点',
         refresh: {
@@ -1593,6 +1603,7 @@ export default {
           title: '探活设置',
           description: '使用上游站点 URL 和该分组的 API Key 发起真实最小请求；连续失败后关闭其绑定的下游 Sub2API 账户。',
           costGuard: '亏本保护',
+          profitPriority: '盈利优先',
           loading: '正在读取探活设置...',
           enabled: '启用自动探活',
           enabledHint: '启用后，当前和未来新增的已对接上游分组都会使用各自的 URL 与 API Key 自动探活。',

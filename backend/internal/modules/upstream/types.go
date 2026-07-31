@@ -87,6 +87,10 @@ type GroupInfo struct {
 	DedicatedMultiplier        *float64 `json:"dedicatedMultiplier,omitempty"`
 	DedicatedMultiplierDisplay string   `json:"dedicatedMultiplierDisplay,omitempty"`
 	HasDedicatedMultiplier     bool     `json:"hasDedicatedMultiplier"`
+	// EffectiveMultiplierUnverified indicates that Sub2API's user-specific
+	// rates endpoint was unavailable. Multiplier must not be treated as a
+	// confirmed effective rate while this flag is set.
+	EffectiveMultiplierUnverified bool `json:"effectiveMultiplierUnverified,omitempty"`
 }
 
 // SnapshotGroup and SnapshotWriter keep upstream decoupled from the group_rates
