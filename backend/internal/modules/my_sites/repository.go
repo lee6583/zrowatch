@@ -106,6 +106,7 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE real_connections ADD COLUMN IF NOT EXISTS operation_id text NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_real_connections_workspace_group_id ON real_connections (user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_real_connections_workspace_group_name ON real_connections (user_id, workspace_admin_account_id, upstream_site_id, upstream_group_name)`,
+		`CREATE INDEX IF NOT EXISTS idx_real_connections_own_group_ids ON real_connections USING GIN (own_group_ids)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_real_connections_operation ON real_connections (user_id, workspace_admin_account_id, operation_id) WHERE operation_id <> ''`,
 	}
 	for _, statement := range statements {

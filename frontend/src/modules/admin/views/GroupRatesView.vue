@@ -30,6 +30,7 @@ const {
   platforms,
   typeFilter,
   platformFilter,
+  downstreamGroupFilter,
   statusFilter,
   sortMode,
   statusCounts,
@@ -46,6 +47,7 @@ const {
   setSearch,
   setTypeFilter,
   setPlatformFilter,
+  setDownstreamGroupFilter,
   setStatusFilter,
   setSortMode,
   goToPage,
@@ -177,6 +179,18 @@ const ownGroupsByName = computed(() => new Map(
 const ownGroupsById = computed(() => new Map(
   ownGroups.value.map(group => [String(group.id), group]),
 ))
+
+const publicOwnGroups = computed(() => {
+  const groups = new Map<string, MySiteMappingOwnGroupOption>()
+  for (const group of ownGroups.value) {
+    const id = String(group.id).trim()
+    if (!id || group.isExclusive || groups.has(id)) continue
+    groups.set(id, group)
+  }
+  return [...groups.values()].sort((first, second) => (
+    first.multiplier - second.multiplier || first.groupName.localeCompare(second.groupName)
+  ))
+})
 
 const downstreamGroupsForRate = (rate: GroupRate): Array<{ key: string; name: string; multiplier: number | null }> => {
   const connections = realConnectionsForRate(rate)
@@ -771,9 +785,11 @@ const filteredRates = computed(() => {
   const filtered = rates.value.filter(rate => {
     const typeMatch = !typeFilter.value || rate.type === typeFilter.value
     const platformMatch = !platformFilter.value || rate.platform === platformFilter.value
+    const downstreamGroupMatch = statusFilter.value !== 'mapped' || !downstreamGroupFilter.value ||
+      downstreamGroupsForRate(rate).some(group => group.key === downstreamGroupFilter.value)
 
     if (statusFilter.value === 'deleted') {
-      return typeMatch && platformMatch && rate.deleted
+      return typeMatch && platformMatch && downstreamGroupMatch && rate.deleted
     }
 
     if (rate.deleted) return false
@@ -782,7 +798,7 @@ const filteredRates = computed(() => {
       (statusFilter.value === 'mapped' && rate.mapped) ||
       (statusFilter.value === 'unmapped' && !rate.mapped)
 
-    return typeMatch && platformMatch && mappedMatch
+    return typeMatch && platformMatch && downstreamGroupMatch && mappedMatch
   })
 
   return [...filtered].sort((a, b) => {
@@ -822,11 +838,18 @@ watch(statusFilter, (status) => {
   if (status === 'mapped') startHealthPolling()
   else stopHealthPolling()
 })
+watch(publicOwnGroups, (groups) => {
+  if (!hasLoadedMappingOptions.value || !downstreamGroupFilter.value) return
+  if (!groups.some(group => String(group.id) === downstreamGroupFilter.value)) {
+    void setDownstreamGroupFilter('')
+  }
+})
 const hasAnyRateData = computed(() => Object.values(statusCounts.value).some(count => count > 0))
 const hasActiveRateFilters = computed(() => Boolean(
   searchQuery.value.trim() ||
   typeFilter.value ||
   platformFilter.value ||
+  (statusFilter.value === 'mapped' && downstreamGroupFilter.value) ||
   statusFilter.value !== 'all',
 ))
 
@@ -1357,6 +1380,10 @@ const handleSortChange = async (event: Event) => {
   await setSortMode(target.value as 'multiplierAsc' | 'multiplierDesc' | 'siteNameAsc' | 'groupNameAsc')
 }
 
+const handleDownstreamGroupChange = async (event: Event) => {
+  await setDownstreamGroupFilter((event.target as HTMLSelectElement).value)
+}
+
 const submitRealConnect = async () => {
   if (!connectingRate.value || connectOwnGroups.value.length === 0) return
   realConnectError.value = ''
@@ -1582,7 +1609,14 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
     </div>
 
     <div class="flex shrink-0 flex-col gap-4 xl:flex-row xl:items-center">
-      <div class="grid min-w-0 w-full flex-1 grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-[10rem_8rem_8rem_9.5rem] xl:gap-2">
+      <div
+        :class="[
+          'grid min-w-0 w-full flex-1 grid-cols-1 gap-3 sm:grid-cols-2 xl:gap-2',
+          statusFilter === 'mapped'
+            ? 'xl:grid-cols-[6.5rem_5.25rem_5.25rem_8.5rem_8.5rem]'
+            : 'xl:grid-cols-[10rem_8rem_8rem_9.5rem]',
+        ]"
+      >
         <div class="relative w-full">
           <Search class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
@@ -1621,9 +1655,24 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             <option value="groupNameAsc">{{ t('admin.groupRates.sort.groupNameAsc') }}</option>
           </Select>
         </div>
+
+        <div v-if="statusFilter === 'mapped'" class="w-full">
+          <Select
+            v-model="downstreamGroupFilter"
+            :aria-label="t('admin.groupRates.filters.downstreamGroupLabel')"
+            :menu-min-width="360"
+            :wrap-options="true"
+            @change="handleDownstreamGroupChange"
+          >
+            <option value="">{{ t('admin.groupRates.filters.allPublicGroups') }}</option>
+            <option v-for="group in publicOwnGroups" :key="group.id" :value="String(group.id)">
+              {{ group.groupName }} {{ formatMultiplier(group.multiplier) }}
+            </option>
+          </Select>
+        </div>
       </div>
 
-      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto', statusFilter === 'mapped' ? 'sm:grid-cols-2 xl:grid-cols-4' : 'sm:grid-cols-1']">
+      <div :class="['grid w-full shrink-0 grid-cols-1 gap-2 sm:w-auto sm:self-end xl:self-auto xl:gap-1.5', statusFilter === 'mapped' ? 'sm:grid-cols-2 xl:grid-cols-[auto_auto_2.75rem_2.75rem] 2xl:grid-cols-[auto_auto_auto_auto]' : 'sm:grid-cols-1']">
         <button
           v-if="statusFilter === 'mapped'"
           type="button"
@@ -1631,7 +1680,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           :aria-checked="healthSettingsSnapshot?.costGuardEnabled ?? false"
           :disabled="isLoadingHealthSettingsSnapshot || isTogglingCostGuard || isSavingHealthSettings"
           :class="[
-            'inline-flex h-11 items-center justify-between gap-3 rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+            'inline-flex h-11 items-center justify-between gap-2 rounded-lg border px-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
             (healthSettingsSnapshot?.costGuardEnabled ?? false)
               ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
               : 'border-border/60 bg-surface text-muted-foreground hover:border-primary/40 hover:text-foreground',
@@ -1663,7 +1712,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
           :aria-checked="healthSettingsSnapshot?.profitPriorityEnabled ?? false"
           :disabled="isLoadingHealthSettingsSnapshot || isTogglingProfitPriority || isSavingHealthSettings"
           :class="[
-            'inline-flex h-11 items-center justify-between gap-3 rounded-lg border px-3 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
+            'inline-flex h-11 items-center justify-between gap-2 rounded-lg border px-2.5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 focus-visible:ring-offset-background',
             (healthSettingsSnapshot?.profitPriorityEnabled ?? false)
               ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
               : 'border-border/60 bg-surface text-muted-foreground hover:border-primary/40 hover:text-foreground',
@@ -1688,14 +1737,27 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             />
           </span>
         </button>
-        <Button v-if="statusFilter === 'mapped'" variant="secondary" class="h-11 gap-2" @click="openHealthSettings">
+        <Button
+          v-if="statusFilter === 'mapped'"
+          variant="secondary"
+          class="h-11 gap-2 px-3"
+          :aria-label="t('admin.groupRates.health.settings.action')"
+          :title="t('admin.groupRates.health.settings.action')"
+          @click="openHealthSettings"
+        >
           <Settings2 class="h-4 w-4" />
-          {{ t('admin.groupRates.health.settings.action') }}
+          <span class="hidden 2xl:inline">{{ t('admin.groupRates.health.settings.action') }}</span>
         </Button>
-        <Button class="h-11 gap-2 shadow-sm" :disabled="isLoading || isSyncingUpstream" @click="refreshGroupRates">
+        <Button
+          class="h-11 gap-2 px-3 shadow-sm"
+          :disabled="isLoading || isSyncingUpstream"
+          :aria-label="t('admin.groupRates.actions.refresh')"
+          :title="t('admin.groupRates.actions.refresh')"
+          @click="refreshGroupRates"
+        >
           <Loader2 v-if="isLoading || isSyncingUpstream" class="h-4 w-4 animate-spin" />
           <RefreshCw v-else class="h-4 w-4" />
-          {{ t('admin.groupRates.actions.refresh') }}
+          <span class="hidden 2xl:inline">{{ t('admin.groupRates.actions.refresh') }}</span>
         </Button>
       </div>
     </div>
@@ -2136,6 +2198,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </Button>
           </div>
         </div>
+
       </div>
     </div>
 

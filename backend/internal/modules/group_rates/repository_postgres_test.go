@@ -139,6 +139,29 @@ func TestRealConnectionIndexesExistInPostgres(t *testing.T) {
 	}
 	assertIndexColumns(t, indexes, "idx_real_connections_workspace_group_id", "(user_id, workspace_admin_account_id, upstream_site_id, upstream_group_id)")
 	assertIndexColumns(t, indexes, "idx_real_connections_workspace_group_name", "(user_id, workspace_admin_account_id, upstream_site_id, upstream_group_name)")
+	assertIndexColumns(t, indexes, "idx_real_connections_own_group_ids", "USING gin (own_group_ids)")
+}
+
+func TestRepositoryListFiltersByOwnGroupIDWithPostgres(t *testing.T) {
+	pool := openPostgresTestPool(t)
+	repository := prepareGroupRatesRepository(t, pool)
+	insertSnapshot(t, pool, "workspace-a", "54")
+	insertRealConnection(t, pool, "workspace-a", "54", "current-name")
+
+	ctx, cancel := context.WithTimeout(context.Background(), postgresTestTimeout)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `UPDATE real_connections SET own_group_ids = '["18"]'::jsonb WHERE id = 'connection-a'`); err != nil {
+		t.Fatalf("set own group IDs: %v", err)
+	}
+
+	matched, err := repository.List(ctx, "user-a", "workspace-a", ListQuery{Page: 1, PageSize: 10, Status: "mapped", OwnGroupID: "18"})
+	if err != nil || len(matched.Items) != 1 || matched.Total != 1 {
+		t.Fatalf("matching own group result = %#v, err=%v", matched, err)
+	}
+	unmatched, err := repository.List(ctx, "user-a", "workspace-a", ListQuery{Page: 1, PageSize: 10, Status: "mapped", OwnGroupID: "19"})
+	if err != nil || len(unmatched.Items) != 0 || unmatched.Total != 0 {
+		t.Fatalf("unmatched own group result = %#v, err=%v", unmatched, err)
+	}
 }
 
 func TestLegacyRealConnectionWorkspaceIsAssignedInPostgres(t *testing.T) {

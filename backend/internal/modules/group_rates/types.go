@@ -37,13 +37,14 @@ type RateRow struct {
 // intentionally fixed by the handler to 30 for now, but keeping it explicit here
 // makes repository pagination deterministic and easy to test.
 type ListQuery struct {
-	Page     int
-	PageSize int
-	Search   string
-	Type     string
-	Platform string
-	Status   string
-	Sort     string
+	Page       int
+	PageSize   int
+	Search     string
+	Type       string
+	Platform   string
+	OwnGroupID string
+	Status     string
+	Sort       string
 }
 
 // StatusCounts provides tab totals after search/type/platform filters but before

@@ -233,6 +233,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 	search := strings.ToLower(strings.TrimSpace(query.Search))
 	filterType := strings.TrimSpace(query.Type)
 	filterPlatform := strings.TrimSpace(query.Platform)
+	filterOwnGroupID := strings.TrimSpace(query.OwnGroupID)
 	filterStatus := strings.TrimSpace(query.Status)
 	if filterStatus == "" {
 		filterStatus = "legacy"
@@ -341,14 +342,27 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%')
 				AND ($4 = '' OR type = $4)
 				AND ($5 = '' OR platform = $5)
+				AND ($6 = '' OR EXISTS (
+					SELECT 1
+					FROM real_connections AS own_group_connections
+					WHERE own_group_connections.user_id = mapped.user_id
+						AND own_group_connections.workspace_admin_account_id = $2
+						AND own_group_connections.upstream_site_id = mapped.site_id
+						AND (
+							own_group_connections.upstream_group_id = mapped.group_id
+							OR ((own_group_connections.upstream_group_id = '' OR mapped.group_id = '')
+								AND own_group_connections.upstream_group_name = mapped.group_name)
+						)
+						AND own_group_connections.own_group_ids @> jsonb_build_array($6::text)
+				))
 		), filtered AS (
 			SELECT *
 			FROM base_filtered
-			WHERE ($6 = 'legacy')
-				OR ($6 = 'all' AND NOT deleted)
-				OR ($6 = 'mapped' AND mapped AND NOT deleted)
-				OR ($6 = 'unmapped' AND NOT mapped AND NOT deleted)
-				OR ($6 = 'deleted' AND deleted)
+			WHERE ($7 = 'legacy')
+				OR ($7 = 'all' AND NOT deleted)
+				OR ($7 = 'mapped' AND mapped AND NOT deleted)
+				OR ($7 = 'unmapped' AND NOT mapped AND NOT deleted)
+				OR ($7 = 'deleted' AND deleted)
 		), facets AS (
 			SELECT
 				COALESCE(array_agg(DISTINCT type ORDER BY type) FILTER (WHERE type <> ''), ARRAY[]::text[]) AS types,
@@ -363,15 +377,15 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 		CROSS JOIN counted
 		CROSS JOIN facets
 		ORDER BY
-			CASE WHEN $7 = 'multiplierAsc' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
-			CASE WHEN $7 = 'multiplierDesc' THEN filtered.multiplier * filtered.recharge_rate END DESC NULLS LAST,
-			CASE WHEN $7 = 'siteNameAsc' THEN lower(filtered.site_name) END ASC,
-			CASE WHEN $7 = 'groupNameAsc' THEN lower(filtered.group_name) END ASC,
-			CASE WHEN $7 = 'default' THEN CASE WHEN filtered.mapped THEN 1 ELSE 0 END END DESC,
-			CASE WHEN $7 = 'default' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
+			CASE WHEN $8 = 'multiplierAsc' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
+			CASE WHEN $8 = 'multiplierDesc' THEN filtered.multiplier * filtered.recharge_rate END DESC NULLS LAST,
+			CASE WHEN $8 = 'siteNameAsc' THEN lower(filtered.site_name) END ASC,
+			CASE WHEN $8 = 'groupNameAsc' THEN lower(filtered.group_name) END ASC,
+			CASE WHEN $8 = 'default' THEN CASE WHEN filtered.mapped THEN 1 ELSE 0 END END DESC,
+			CASE WHEN $8 = 'default' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
 			filtered.site_name ASC, filtered.group_name ASC, filtered.platform ASC, filtered.type ASC
-		LIMIT $8 OFFSET $9
-	`, userID, adminAccountID, search, filterType, filterPlatform, filterStatus, sortMode, query.PageSize, offset)
+		LIMIT $9 OFFSET $10
+	`, userID, adminAccountID, search, filterType, filterPlatform, filterOwnGroupID, filterStatus, sortMode, query.PageSize, offset)
 	if err != nil {
 		return listRecords{}, err
 	}
@@ -387,7 +401,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 		result.Types = facets.Types
 		result.Platforms = facets.Platforms
 	}
-	counts, err := r.statusCounts(ctx, userID, adminAccountID, search, filterType, filterPlatform)
+	counts, err := r.statusCounts(ctx, userID, adminAccountID, search, filterType, filterPlatform, filterOwnGroupID)
 	if err != nil {
 		return listRecords{}, err
 	}
@@ -607,7 +621,7 @@ func (r *Repository) facets(ctx context.Context, userID string, adminAccountID s
 // statusCounts calculates status-tab totals using the same current-row and
 // mapped semantics as List. Search/type/platform remain active so tab counts
 // always describe the result set the operator is currently inspecting.
-func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccountID string, search string, filterType string, filterPlatform string) (StatusCounts, error) {
+func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccountID string, search string, filterType string, filterPlatform string, filterOwnGroupID string) (StatusCounts, error) {
 	var counts StatusCounts
 	err := r.db.QueryRow(ctx, `
 		WITH enriched AS (
@@ -658,6 +672,19 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%')
 				AND ($4 = '' OR type = $4)
 				AND ($5 = '' OR platform = $5)
+				AND ($6 = '' OR EXISTS (
+					SELECT 1
+					FROM real_connections AS own_group_connections
+					WHERE own_group_connections.user_id = mapped.user_id
+						AND own_group_connections.workspace_admin_account_id = $2
+						AND own_group_connections.upstream_site_id = mapped.site_id
+						AND (
+							own_group_connections.upstream_group_id = mapped.group_id
+							OR ((own_group_connections.upstream_group_id = '' OR mapped.group_id = '')
+								AND own_group_connections.upstream_group_name = mapped.group_name)
+						)
+						AND own_group_connections.own_group_ids @> jsonb_build_array($6::text)
+				))
 		)
 		SELECT
 			count(*) FILTER (WHERE NOT deleted)::int,
@@ -665,7 +692,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			count(*) FILTER (WHERE NOT mapped AND NOT deleted)::int,
 			count(*) FILTER (WHERE deleted)::int
 		FROM base_filtered
-	`, userID, adminAccountID, search, filterType, filterPlatform).Scan(
+	`, userID, adminAccountID, search, filterType, filterPlatform, filterOwnGroupID).Scan(
 		&counts.All,
 		&counts.Mapped,
 		&counts.Unmapped,

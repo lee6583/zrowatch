@@ -210,7 +210,7 @@ func TestGroupRateCostGuardRemovesOnlyUnprofitableDownstreamGroup(t *testing.T) 
 	}
 }
 
-func TestGroupRateCostGuardDoesNotRemoveWhenCostEqualsDownstream(t *testing.T) {
+func TestGroupRateCostGuardRemovesWhenCostEqualsDownstream(t *testing.T) {
 	remote := &costGuardRemote{accountGroupIDs: []any{float64(8)}}
 	server := newCostGuardSub2APIServer(t, remote)
 	defer server.Close()
@@ -220,8 +220,26 @@ func TestGroupRateCostGuardDoesNotRemoveWhenCostEqualsDownstream(t *testing.T) {
 	oldMetrics, newMetrics := costGuardMetrics(0.07, 0.08)
 
 	results := service.ApplyGroupRateCostGuardAfterSync(context.Background(), "user-1", "admin-1", "site-1", "source", oldMetrics, newMetrics, true)
-	if len(results) != 0 || len(remote.putBodies) != 0 || len(connRepo.pauses) != 0 {
-		t.Fatalf("equal cost must not remove groups, results=%#v puts=%d pauses=%#v", results, len(remote.putBodies), connRepo.pauses)
+	if !hasCostGuardStatus(results, "removed", "8") {
+		t.Fatalf("equal cost must remove the break-even group, got %#v", results)
+	}
+	if len(remote.putBodies) != 1 || len(remote.accountGroupIDs) != 0 {
+		t.Fatalf("expected equal-cost group removed remotely, puts=%d groups=%#v", len(remote.putBodies), remote.accountGroupIDs)
+	}
+	if len(connRepo.connections["conn-1"].OwnGroupIDs) != 0 {
+		t.Fatalf("expected equal-cost group removed locally, got %#v", connRepo.connections["conn-1"].OwnGroupIDs)
+	}
+	if _, ok := connRepo.pauses[costGuardPauseKey("conn-1", "8")]; !ok {
+		t.Fatal("expected pause record for equal-cost group")
+	}
+}
+
+func TestCostGuardShouldPauseTreatsEquivalentCalculatedRatesAsEqual(t *testing.T) {
+	if !costGuardShouldPause(0.04*2, 0.08) {
+		t.Fatal("equivalent calculated rates must trigger cost guard")
+	}
+	if costGuardShouldPause(0.079, 0.08) {
+		t.Fatal("a genuinely cheaper upstream rate must remain supplied")
 	}
 }
 

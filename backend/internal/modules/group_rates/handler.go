@@ -40,13 +40,14 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rows, err := h.service.List(r.Context(), userID, adminAccountID, ListQuery{
-		Page:     intQuery(query.Get("page"), 1),
-		PageSize: 30,
-		Search:   query.Get("search"),
-		Type:     query.Get("type"),
-		Platform: query.Get("platform"),
-		Status:   query.Get("status"),
-		Sort:     query.Get("sort"),
+		Page:       intQuery(query.Get("page"), 1),
+		PageSize:   30,
+		Search:     query.Get("search"),
+		Type:       query.Get("type"),
+		Platform:   query.Get("platform"),
+		OwnGroupID: query.Get("ownGroupId"),
+		Status:     query.Get("status"),
+		Sort:       query.Get("sort"),
 	})
 	if err != nil {
 		log.Printf("list group rates: %v", err)

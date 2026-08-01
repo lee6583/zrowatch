@@ -8,8 +8,8 @@ func TestNormalizeListQueryPreservesLegacyAndAcceptsExplicitControls(t *testing.
 		t.Fatalf("legacy controls changed: status=%q sort=%q", legacy.Status, legacy.Sort)
 	}
 
-	explicit := normalizeListQuery(ListQuery{Status: "mapped", Sort: "multiplierDesc", PageSize: 500})
-	if explicit.Status != "mapped" || explicit.Sort != "multiplierDesc" || explicit.PageSize != 100 {
+	explicit := normalizeListQuery(ListQuery{Status: "mapped", Sort: "multiplierDesc", OwnGroupID: " 18 ", PageSize: 500})
+	if explicit.Status != "mapped" || explicit.Sort != "multiplierDesc" || explicit.OwnGroupID != "18" || explicit.PageSize != 100 {
 		t.Fatalf("explicit controls not normalized: %#v", explicit)
 	}
 

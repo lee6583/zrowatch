@@ -221,6 +221,7 @@ func normalizeListQuery(query ListQuery) ListQuery {
 	query.Search = strings.TrimSpace(query.Search)
 	query.Type = strings.TrimSpace(query.Type)
 	query.Platform = strings.TrimSpace(query.Platform)
+	query.OwnGroupID = strings.TrimSpace(query.OwnGroupID)
 	query.Status = strings.TrimSpace(query.Status)
 	query.Sort = strings.TrimSpace(query.Sort)
 	switch query.Status {

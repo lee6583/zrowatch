@@ -22,6 +22,7 @@ export interface GroupRatesQuery {
   search: string
   type: string
   platform: string
+  ownGroupId: string
   status: GroupRateStatusFilter
   sort: GroupRateSort
 }

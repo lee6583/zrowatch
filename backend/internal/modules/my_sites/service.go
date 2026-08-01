@@ -2020,9 +2020,15 @@ func (s *Service) syncLegacyAccountNames(ctx context.Context, session upstream.S
 	return results
 }
 
+func costGuardShouldPause(upstreamCost, downstreamMultiplier float64) bool {
+	const epsilon = 1e-9
+	return upstreamCost > downstreamMultiplier || math.Abs(upstreamCost-downstreamMultiplier) <= epsilon
+}
+
 // ApplyGroupRateCostGuardAfterSync compares the synced upstream cost against
 // the bound Sub2API downstream group multipliers and removes/restores only the
-// groups that this policy previously touched.
+// groups that this policy previously touched. Break-even supply is paused too,
+// because it has no margin after the upstream cost reaches the downstream rate.
 func (s *Service) ApplyGroupRateCostGuardAfterSync(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics upstream.Metrics, enabled bool) []GroupRateCostGuardResult {
 	if !enabled {
 		results := s.RestoreGroupRateCostGuardPausedConnections(ctx, userID, adminAccountID)
@@ -2241,7 +2247,7 @@ func (s *Service) ApplyGroupRateCostGuardAfterSync(ctx context.Context, userID, 
 			if _, ok := pauseSet[ownID]; ok {
 				paused = true
 			}
-			if upstreamCost > *downstreamMultiplier {
+			if costGuardShouldPause(upstreamCost, *downstreamMultiplier) {
 				if present {
 					desiredIDs, desiredNames, _ = removeGroup(desiredIDs, desiredNames, ownID)
 					if !paused {
@@ -2254,7 +2260,7 @@ func (s *Service) ApplyGroupRateCostGuardAfterSync(ctx context.Context, userID, 
 							UpstreamGroupName:       conn.UpstreamGroupName,
 							OwnGroupID:              ownID,
 							OwnGroupName:            ownName,
-							LastError:               "cost_guard:upstream_cost_gt_downstream",
+							LastError:               "cost_guard:upstream_cost_gte_downstream",
 						})
 					}
 					emitRemoved(ownID, ownName, downstreamMultiplier)

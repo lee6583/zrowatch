@@ -8,6 +8,7 @@ type StoredGroupRatesFilters = {
   search?: string
   typeFilter?: string
   platformFilter?: string
+  downstreamGroupFilter?: string
   statusFilter?: GroupRateStatusFilter
   sortMode?: GroupRateSort
 }
@@ -54,6 +55,7 @@ export const useGroupRates = () => {
   const search = ref(typeof storedFilters.search === 'string' ? storedFilters.search : '')
   const typeFilter = ref(typeof storedFilters.typeFilter === 'string' ? storedFilters.typeFilter : '')
   const platformFilter = ref(typeof storedFilters.platformFilter === 'string' ? storedFilters.platformFilter : '')
+  const downstreamGroupFilter = ref(typeof storedFilters.downstreamGroupFilter === 'string' ? storedFilters.downstreamGroupFilter : '')
   const statusFilter = ref<GroupRateStatusFilter>(isGroupRateStatusFilter(storedFilters.statusFilter) ? storedFilters.statusFilter : 'all')
   const sortMode = ref<GroupRateSort>(isGroupRateSort(storedFilters.sortMode) ? storedFilters.sortMode : 'multiplierAsc')
   const statusCounts = ref<GroupRateStatusCounts>({ all: 0, mapped: 0, unmapped: 0, deleted: 0 })
@@ -65,11 +67,12 @@ export const useGroupRates = () => {
   const historyErrorKey = ref<string | null>(null)
   let ratesRequestId = 0
 
-  watch([search, typeFilter, platformFilter, statusFilter, sortMode], () => {
+  watch([search, typeFilter, platformFilter, downstreamGroupFilter, statusFilter, sortMode], () => {
     writeStoredGroupRatesFilters({
       search: search.value,
       typeFilter: typeFilter.value,
       platformFilter: platformFilter.value,
+      downstreamGroupFilter: downstreamGroupFilter.value,
       statusFilter: statusFilter.value,
       sortMode: sortMode.value,
     })
@@ -85,6 +88,7 @@ export const useGroupRates = () => {
         search: search.value,
         type: typeFilter.value,
         platform: platformFilter.value,
+        ownGroupId: statusFilter.value === 'mapped' ? downstreamGroupFilter.value : '',
         status: statusFilter.value,
         sort: sortMode.value,
       })
@@ -132,6 +136,11 @@ export const useGroupRates = () => {
 
   const setPlatformFilter = async (value: string) => {
     platformFilter.value = value
+    await resetPageAndLoadRates()
+  }
+
+  const setDownstreamGroupFilter = async (value: string) => {
+    downstreamGroupFilter.value = value
     await resetPageAndLoadRates()
   }
 
@@ -191,6 +200,7 @@ export const useGroupRates = () => {
     search,
     typeFilter,
     platformFilter,
+    downstreamGroupFilter,
     statusFilter,
     sortMode,
     statusCounts,
@@ -206,6 +216,7 @@ export const useGroupRates = () => {
     setSearch,
     setTypeFilter,
     setPlatformFilter,
+    setDownstreamGroupFilter,
     setStatusFilter,
     setSortMode,
     goToPage,

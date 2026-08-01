@@ -32,9 +32,13 @@ const props = withDefaults(
       number?: boolean
       trim?: boolean
     }
+    menuMinWidth?: number
+    wrapOptions?: boolean
   }>(),
   {
     modelValue: '',
+    menuMinWidth: 0,
+    wrapOptions: false,
   },
 )
 
@@ -127,9 +131,17 @@ const updateMenuPosition = () => {
   const availableAbove = rect.top - viewportPadding - gap
   const placeAbove = availableBelow < 180 && availableAbove > availableBelow
   const maxHeight = Math.max(160, Math.min(288, placeAbove ? availableAbove : availableBelow))
+  const width = Math.min(
+    Math.max(rect.width, props.menuMinWidth),
+    window.innerWidth - viewportPadding * 2,
+  )
+  const left = Math.min(
+    Math.max(viewportPadding, rect.left),
+    window.innerWidth - viewportPadding - width,
+  )
   menuStyle.value = {
-    left: `${rect.left}px`,
-    width: `${rect.width}px`,
+    left: `${left}px`,
+    width: `${width}px`,
     maxHeight: `${maxHeight}px`,
     ...(placeAbove
       ? { bottom: `${window.innerHeight - rect.top + gap}px` }
@@ -325,7 +337,12 @@ onBeforeUnmount(() => {
                 :class="String(option.value ?? '') === String(selectedValue ?? '') ? 'opacity-100' : 'opacity-0'"
                 aria-hidden="true"
               />
-              <span class="min-w-0 flex-1 truncate">{{ option.label }}</span>
+              <span
+                :class="cn(
+                  'min-w-0 flex-1',
+                  props.wrapOptions ? 'whitespace-normal break-words' : 'truncate',
+                )"
+              >{{ option.label }}</span>
             </button>
           </div>
         </div>

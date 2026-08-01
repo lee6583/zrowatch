@@ -1653,7 +1653,9 @@ export default {
         searchLabel: '搜索',
         searchPlaceholder: '搜索站点或分组...',
         typeLabel: '分组类型',
-        platformLabel: '站点平台'
+        platformLabel: '站点平台',
+        downstreamGroupLabel: '下游公开分组筛选',
+        allPublicGroups: '全部公开分组'
       },
       sort: {
         label: '排序',

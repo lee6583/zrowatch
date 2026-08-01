@@ -1653,7 +1653,9 @@ export default {
         searchLabel: 'Search',
         searchPlaceholder: 'Search site or group...',
         typeLabel: 'Group Type',
-        platformLabel: 'Site Platform'
+        platformLabel: 'Site Platform',
+        downstreamGroupLabel: 'Downstream public group filter',
+        allPublicGroups: 'All Public Groups'
       },
       sort: {
         label: 'Sort',
