@@ -1312,7 +1312,7 @@ export default {
       }
     },
       upstream: {
-        searchPlaceholder: '搜索站点名称...',
+        searchPlaceholder: '搜索站点名称或 URL...',
         filters: {
           allPlatforms: '全部平台',
           platform: '平台筛选',

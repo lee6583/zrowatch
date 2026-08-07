@@ -38,6 +38,15 @@ const isUpstreamSortMode = (value: unknown): value is UpstreamSortMode => (
   typeof value === 'string' && upstreamSortModes.has(value as UpstreamSortMode)
 )
 
+const normalizeSiteSearchValue = (value: string): string => (
+  value
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/^www\./, '')
+    .replace(/\/+$/, '')
+)
+
 const readStoredUpstreamFilters = (): StoredUpstreamFilters => {
   try {
     const raw = window.localStorage.getItem(upstreamFilterStorageKey)
@@ -251,13 +260,16 @@ watch(connectedGroupTypes, (types) => {
 
 const filteredSites = computed(() => {
   const keyword = searchQuery.value.trim().toLowerCase()
+  const normalizedKeyword = normalizeSiteSearchValue(searchQuery.value)
   const platform = platformFilter.value.toLowerCase()
   const groupType = connectedGroupTypeFilter.value.toLowerCase()
 
   const sites = upstreamSites.value.filter(site => {
+    const baseUrl = site.baseUrl.toLowerCase()
     const matchesSearch = !keyword
       || site.name.toLowerCase().includes(keyword)
-      || site.baseUrl.toLowerCase().includes(keyword)
+      || baseUrl.includes(keyword)
+      || normalizeSiteSearchValue(baseUrl).includes(normalizedKeyword)
     const matchesPlatform = !platform || site.platform.toLowerCase() === platform
     const matchesGroupType = !groupType || connectedGroupsForSite(site).some(group => (
       group.platform?.toLowerCase() === groupType

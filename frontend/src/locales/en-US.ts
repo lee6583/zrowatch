@@ -1312,7 +1312,7 @@ export default {
       }
     },
       upstream: {
-        searchPlaceholder: 'Search site name...',
+        searchPlaceholder: 'Search site name or URL...',
         filters: {
           allPlatforms: 'All Platforms',
           platform: 'Platform filter',
