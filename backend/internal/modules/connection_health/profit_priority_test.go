@@ -61,7 +61,8 @@ func profitCandidate(id string, tier int, latency *int, cost float64, groups ...
 	schedulable := true
 	return &profitPriorityCandidate{
 		accountID: id, stabilityRank: tier, latencyMs: latency, effectiveCost: cost, groupIDs: groupSet,
-		remote: upstream.Sub2APIAdminAccountState{Priority: &priority, Status: "active", Schedulable: &schedulable},
+		remote:          upstream.Sub2APIAdminAccountState{Priority: &priority, Status: "active", Schedulable: &schedulable},
+		runtimeComplete: true,
 	}
 }
 
@@ -103,11 +104,68 @@ func TestRankProfitPriorityCandidatesPrefersClearlyFasterAccount(t *testing.T) {
 
 func TestProfitPriorityRuntimeAndProbeConsecutiveFailuresAreUnstable(t *testing.T) {
 	candidate := &profitPriorityCandidate{}
-	candidate.applyRuntimeAndProbe([]upstream.Sub2APIAccountRuntimeSample{{Success: true}, {Success: true}, {Success: true}}, profitProbeStats{
+	now := time.Now().UTC()
+	candidate.applyRuntimeAndProbe(now, []upstream.Sub2APIAccountRuntimeSample{
+		{Success: true, CreatedAt: now}, {Success: true, CreatedAt: now}, {Success: true, CreatedAt: now},
+	}, profitProbeStats{
 		failures: 2, consecutiveFailures: 2,
 	})
 	if candidate.stabilityTier != "unstable" || candidate.stabilityRank != 3 {
 		t.Fatalf("expected unstable tier, got %s/%d", candidate.stabilityTier, candidate.stabilityRank)
+	}
+}
+
+func TestProfitPriorityBurst429ImmediatelyEntersWarning(t *testing.T) {
+	now := time.Now().UTC()
+	runtime := make([]upstream.Sub2APIAccountRuntimeSample, 0, 30)
+	for index := 0; index < 27; index++ {
+		runtime = append(runtime, upstream.Sub2APIAccountRuntimeSample{Success: true, CreatedAt: now.Add(-time.Duration(index) * time.Second)})
+	}
+	for index := 0; index < 3; index++ {
+		status := 429
+		runtime = append(runtime, upstream.Sub2APIAccountRuntimeSample{
+			Success: false, StatusCode: &status, FailureClass: "rate_limit", CreatedAt: now.Add(-time.Duration(index) * time.Second),
+		})
+	}
+	candidate := profitCandidate("42", 0, nil, 0.04, "18")
+	candidate.applyRuntimeAndProbe(now, runtime, profitProbeStats{})
+	if !candidate.burstFailure || candidate.hardFailure || candidate.stabilityTier != "warning" {
+		t.Fatalf("429 burst classification = burst:%v hard:%v tier:%s", candidate.burstFailure, candidate.hardFailure, candidate.stabilityTier)
+	}
+	stored := ProfitPriorityState{StabilityTier: "stable", LastAppliedPriority: 10}
+	stored = prepareProfitPriorityState(now, candidate, stored, true)
+	if stored.StabilityTier != "warning" || !candidate.emergency || stored.DegradationReason != "error_burst" {
+		t.Fatalf("429 burst should immediately degrade: candidate=%#v state=%#v", candidate, stored)
+	}
+}
+
+func TestProfitPriorityIsolated429DoesNotDegrade(t *testing.T) {
+	now := time.Now().UTC()
+	runtime := make([]upstream.Sub2APIAccountRuntimeSample, 0, 30)
+	for index := 0; index < 29; index++ {
+		runtime = append(runtime, upstream.Sub2APIAccountRuntimeSample{Success: true, CreatedAt: now.Add(-time.Duration(index) * time.Second)})
+	}
+	status := 429
+	runtime = append(runtime, upstream.Sub2APIAccountRuntimeSample{
+		Success: false, StatusCode: &status, FailureClass: "rate_limit", CreatedAt: now,
+	})
+	candidate := profitCandidate("42", 0, nil, 0.04, "18")
+	candidate.applyRuntimeAndProbe(now, runtime, profitProbeStats{})
+	if candidate.burstFailure || candidate.hardFailure || candidate.stabilityTier != "stable" {
+		t.Fatalf("isolated 429 should remain stable: %#v", candidate)
+	}
+}
+
+func TestProfitPriorityRepeatedServerErrorsAreImmediateHardFailure(t *testing.T) {
+	now := time.Now().UTC()
+	status := 502
+	candidate := profitCandidate("42", 0, nil, 0.04, "18")
+	candidate.applyRuntimeAndProbe(now, []upstream.Sub2APIAccountRuntimeSample{
+		{Success: false, StatusCode: &status, FailureClass: "server", CreatedAt: now},
+		{Success: false, StatusCode: &status, FailureClass: "server", CreatedAt: now.Add(-time.Minute)},
+	}, profitProbeStats{})
+	if !candidate.hardFailure || candidate.stabilityTier != "unstable" || candidate.degradationReason != "upstream_errors" {
+		t.Fatalf("repeated server errors should be unstable: %#v", candidate)
 	}
 }
 
@@ -145,10 +203,11 @@ func TestProfitPriorityDowngradeRequiresTwoAcceptedObservations(t *testing.T) {
 func TestProfitPriorityStableRecoveryRequiresThreeAcceptedObservations(t *testing.T) {
 	now := time.Now().UTC()
 	rate := 1.0
-	stored := ProfitPriorityState{StabilityTier: "unstable", SuccessRate: &rate, LastAppliedPriority: 10}
+	lastError := now.Add(-profitPriorityRecoveryCleanPeriod)
+	stored := ProfitPriorityState{StabilityTier: "unstable", SuccessRate: &rate, LastAppliedPriority: 10, LastUpstreamErrorAt: &lastError}
 	for round := 1; round <= 3; round++ {
 		candidate := profitCandidate("42", 3, nil, 0.04, "18")
-		candidate.sampleCount, candidate.successRate = 30, &rate
+		candidate.sampleCount, candidate.successRate, candidate.cleanSuccesses = 30, &rate, 5
 		stored = prepareProfitPriorityState(now.Add(time.Duration(round-1)*time.Minute), candidate, stored, true)
 		if round < 3 && stored.StabilityTier != "unstable" {
 			t.Fatalf("round %d recovered too early: %#v", round, stored)
@@ -156,6 +215,19 @@ func TestProfitPriorityStableRecoveryRequiresThreeAcceptedObservations(t *testin
 	}
 	if stored.StabilityTier != "stable" {
 		t.Fatalf("third observation should confirm stable recovery: %#v", stored)
+	}
+}
+
+func TestProfitPriorityRecoveryWaitsForCleanPeriod(t *testing.T) {
+	now := time.Now().UTC()
+	rate := 1.0
+	lastError := now.Add(-4 * time.Minute)
+	stored := ProfitPriorityState{StabilityTier: "warning", SuccessRate: &rate, LastAppliedPriority: 10, LastUpstreamErrorAt: &lastError}
+	candidate := profitCandidate("42", 2, nil, 0.04, "18")
+	candidate.sampleCount, candidate.successRate, candidate.cleanSuccesses = 30, &rate, 20
+	stored = prepareProfitPriorityState(now, candidate, stored, true)
+	if stored.StabilityTier != "warning" || stored.CleanRecoveryRounds != 0 {
+		t.Fatalf("account recovered before clean period elapsed: %#v", stored)
 	}
 }
 
@@ -218,6 +290,21 @@ func TestProfitPriorityComponentRequiresConfirmedRankAndCooldown(t *testing.T) {
 	first.emergency, first.costChanged = false, true
 	if !profitPriorityComponentReady(now, ranked, states, 10) {
 		t.Fatal("cost change should bypass cooldown")
+	}
+}
+
+func TestProfitPriorityIncompleteRuntimeBlocksComponentUpdate(t *testing.T) {
+	now := time.Now().UTC()
+	first := profitCandidate("a", 0, nil, 0.04, "18")
+	second := profitCandidate("b", 0, nil, 0.08, "18")
+	first.emergency = true
+	second.runtimeComplete = false
+	states := map[string]ProfitPriorityState{
+		"a": {ObservedRank: 1, ObservedRankRounds: 3},
+		"b": {ObservedRank: 2, ObservedRankRounds: 3},
+	}
+	if profitPriorityComponentReady(now, []*profitPriorityCandidate{first, second}, states, 10) {
+		t.Fatal("incomplete provider-error data must block priority changes")
 	}
 }
 

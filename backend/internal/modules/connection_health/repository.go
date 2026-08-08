@@ -230,6 +230,13 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS sample_count integer NOT NULL DEFAULT 0`,
 		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS cooldown_until timestamptz NULL`,
 		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS last_observed_at timestamptz NULL`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS short_error_count integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS short_error_rate double precision NULL`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS last_upstream_error_at timestamptz NULL`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS last_upstream_error_class text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS degradation_reason text NOT NULL DEFAULT ''`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS clean_recovery_rounds integer NOT NULL DEFAULT 0`,
+		`ALTER TABLE connection_health_profit_priority_states ADD COLUMN IF NOT EXISTS last_priority_change_at timestamptz NULL`,
 		`CREATE TABLE IF NOT EXISTS connection_health_group_rate_monitor_overrides (
 			user_id text NOT NULL,
 			admin_account_id text NOT NULL DEFAULT '',

@@ -89,12 +89,14 @@ func TestFetchSub2APIAdminAccountRuntimeSamples(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchSub2APIAdminAccountRuntimeSamples() error = %v", err)
 	}
-	if len(samples) != 4 || samples[0].LatencyMs == nil || *samples[0].LatencyMs != 1250 || samples[1].Success || samples[3].Success {
+	if len(samples) != 4 || samples[0].LatencyMs == nil || *samples[0].LatencyMs != 1250 || samples[1].Success ||
+		samples[1].FailureClass != "rate_limit" || samples[1].StatusCode == nil || *samples[1].StatusCode != 429 ||
+		samples[3].Success || samples[3].FailureClass != "server" {
 		t.Fatalf("unexpected runtime samples: %#v", samples)
 	}
 }
 
-func TestFetchSub2APIAdminAccountRuntimeSamplesFallsBackWhenOpsMonitoringIsUnavailable(t *testing.T) {
+func TestFetchSub2APIAdminAccountRuntimeSamplesRequiresOpsMonitoring(t *testing.T) {
 	now := time.Now().UTC()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/admin/ops/upstream-errors" {
@@ -110,8 +112,29 @@ func TestFetchSub2APIAdminAccountRuntimeSamplesFallsBackWhenOpsMonitoringIsUnava
 	service := NewPlatformService(NewHTTPClient(server.Client()))
 	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "test-token"}
 	samples, err := service.FetchSub2APIAdminAccountRuntimeSamples(session, "42", now.Add(-24*time.Hour), 20)
-	if err != nil || len(samples) != 1 || !samples[0].Success {
-		t.Fatalf("expected successful usage fallback, samples=%#v err=%v", samples, err)
+	if err == nil || len(samples) != 0 {
+		t.Fatalf("missing upstream errors must keep runtime data incomplete, samples=%#v err=%v", samples, err)
+	}
+}
+
+func TestSub2APIUpstreamFailureClass(t *testing.T) {
+	tests := []struct {
+		name   string
+		record map[string]any
+		want   string
+	}{
+		{name: "auth", record: map[string]any{"upstream_status_code": float64(401)}, want: "auth"},
+		{name: "rate limit", record: map[string]any{"status_code": float64(429)}, want: "rate_limit"},
+		{name: "server", record: map[string]any{"status_code": float64(502)}, want: "server"},
+		{name: "transport", record: map[string]any{"error_type": "upstream_transport_error"}, want: "transport"},
+		{name: "client", record: map[string]any{"status_code": float64(400), "phase": "client"}, want: ""},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := sub2APIUpstreamFailureClass(test.record); got != test.want {
+				t.Fatalf("failure class = %q, want %q", got, test.want)
+			}
+		})
 	}
 }
 

@@ -13,18 +13,26 @@ import (
 )
 
 const (
-	profitPriorityRuntimeWindow       = 10 * time.Minute
-	profitPriorityRuntimeLimit        = 200
-	profitPriorityProbeLimit          = 5
-	profitPriorityCacheTTL            = time.Minute
-	profitPriorityObservationInterval = time.Minute
-	profitPriorityMinSamples          = 30
-	profitPriorityEWMAAlpha           = 0.30
-	profitPriorityRankConfirmRounds   = 3
-	profitPriorityCooldown            = 5 * time.Minute
-	profitPrioritySpacing             = 10
-	profitPriorityLatencyAbsMs        = 2000
-	profitPriorityLatencyRatio        = 0.20
+	profitPriorityRuntimeWindow        = 15 * time.Minute
+	profitPriorityBurstWindow          = 2 * time.Minute
+	profitPriorityRecoveryCleanPeriod  = 5 * time.Minute
+	profitPriorityRuntimeLimit         = 200
+	profitPriorityProbeLimit           = 5
+	profitPriorityCacheTTL             = 30 * time.Second
+	profitPriorityObservationInterval  = time.Minute
+	profitPriorityMinSamples           = 30
+	profitPriorityBurstMinErrors       = 3
+	profitPrioritySevereMinErrors      = 2
+	profitPriorityRecoveryMinSuccesses = 5
+	profitPriorityRecoveryRounds       = 3
+	profitPriorityBurstErrorRate       = 0.10
+	profitPriorityRecoverySuccessRate  = 0.98
+	profitPriorityEWMAAlpha            = 0.30
+	profitPriorityRankConfirmRounds    = 3
+	profitPriorityCooldown             = 5 * time.Minute
+	profitPrioritySpacing              = 10
+	profitPriorityLatencyAbsMs         = 2000
+	profitPriorityLatencyRatio         = 0.20
 )
 
 type ProfitPriorityActioner interface {
@@ -49,24 +57,32 @@ type profitRuntimeCacheEntry struct {
 }
 
 type profitPriorityCandidate struct {
-	accountID     string
-	accountName   string
-	connection    my_sites.RealConnection
-	sourceKey     string
-	groupIDs      map[string]struct{}
-	effectiveCost float64
-	remote        upstream.Sub2APIAdminAccountState
-	stabilityTier string
-	stabilityRank int
-	successRate   *float64
-	latencyMs     *int
-	sampleCount   int
-	probeFailures int
-	hardFailure   bool
-	emergency     bool
-	costChanged   bool
-	observed      bool
-	ambiguousCost bool
+	accountID         string
+	accountName       string
+	connection        my_sites.RealConnection
+	sourceKey         string
+	groupIDs          map[string]struct{}
+	effectiveCost     float64
+	remote            upstream.Sub2APIAdminAccountState
+	stabilityTier     string
+	stabilityRank     int
+	successRate       *float64
+	latencyMs         *int
+	sampleCount       int
+	probeFailures     int
+	shortErrors       int
+	shortRate         *float64
+	cleanSuccesses    int
+	lastFailureAt     *time.Time
+	lastFailureClass  string
+	degradationReason string
+	runtimeComplete   bool
+	burstFailure      bool
+	hardFailure       bool
+	emergency         bool
+	costChanged       bool
+	observed          bool
+	ambiguousCost     bool
 }
 
 type profitProbeStats struct {
@@ -356,9 +372,10 @@ func (s *Service) buildProfitPriorityCandidates(
 		runtime, err := s.profitRuntimeSamples(ctx, session, adminAccountID, accountID)
 		if err != nil {
 			summary.Failed++
+			continue
 		}
 		probe := probeByGroup[candidate.sourceKey]
-		candidate.applyRuntimeAndProbe(runtime, probe)
+		candidate.applyRuntimeAndProbe(time.Now(), runtime, probe)
 	}
 	return result, managed, summary
 }
@@ -428,17 +445,44 @@ func profitProbeStatsByGroup(cycles []GroupRateProbeCycle) map[string]profitProb
 	return result
 }
 
-func (candidate *profitPriorityCandidate) applyRuntimeAndProbe(runtime []upstream.Sub2APIAccountRuntimeSample, probe profitProbeStats) {
+func (candidate *profitPriorityCandidate) applyRuntimeAndProbe(now time.Time, runtime []upstream.Sub2APIAccountRuntimeSample, probe profitProbeStats) {
+	candidate.runtimeComplete = true
 	candidate.sampleCount = len(runtime)
 	candidate.probeFailures = probe.consecutiveFailures
 	successes := probe.successes
 	failures := probe.failures
+	shortSamples := 0
+	shortFailures := 0
+	severeFailures := 0
+	authFailures := 0
+	cleanSuccesses := probe.successes
+	cleanSince := now.Add(-profitPriorityRecoveryCleanPeriod)
 	latencies := make([]int, 0, len(runtime))
 	for _, sample := range runtime {
 		if sample.Success {
 			successes++
+			if !sample.CreatedAt.Before(cleanSince) {
+				cleanSuccesses++
+			}
 		} else {
 			failures++
+			if candidate.lastFailureAt == nil || sample.CreatedAt.After(*candidate.lastFailureAt) {
+				failureAt := sample.CreatedAt
+				candidate.lastFailureAt = &failureAt
+				candidate.lastFailureClass = sample.FailureClass
+			}
+		}
+		if !sample.CreatedAt.Before(now.Add(-profitPriorityBurstWindow)) {
+			shortSamples++
+			if !sample.Success {
+				shortFailures++
+				switch sample.FailureClass {
+				case "auth":
+					authFailures++
+				case "timeout", "transport", "server":
+					severeFailures++
+				}
+			}
 		}
 		if sample.Success && sample.LatencyMs != nil {
 			latencies = append(latencies, *sample.LatencyMs)
@@ -459,13 +503,38 @@ func (candidate *profitPriorityCandidate) applyRuntimeAndProbe(runtime []upstrea
 		rate := float64(successes) / float64(total)
 		candidate.successRate = &rate
 	}
-	candidate.hardFailure = probe.consecutiveFailures >= 2 ||
+	candidate.shortErrors = shortFailures
+	candidate.cleanSuccesses = cleanSuccesses
+	if shortSamples > 0 {
+		rate := float64(shortFailures) / float64(shortSamples)
+		candidate.shortRate = &rate
+	}
+	candidate.burstFailure = shortFailures >= profitPriorityBurstMinErrors && candidate.shortRate != nil &&
+		*candidate.shortRate >= profitPriorityBurstErrorRate
+	candidate.hardFailure = authFailures > 0 || severeFailures >= profitPrioritySevereMinErrors || probe.consecutiveFailures >= 2 ||
 		(candidate.sampleCount >= profitPriorityMinSamples && candidate.successRate != nil && *candidate.successRate < 0.60)
 	switch {
 	case candidate.hardFailure:
 		candidate.stabilityTier, candidate.stabilityRank = "unstable", 3
-	case probe.consecutiveFailures == 1 || (candidate.sampleCount >= profitPriorityMinSamples && candidate.successRate != nil && *candidate.successRate < 0.90):
+		switch {
+		case authFailures > 0:
+			candidate.degradationReason = "auth"
+		case severeFailures >= profitPrioritySevereMinErrors:
+			candidate.degradationReason = "upstream_errors"
+		case probe.consecutiveFailures >= 2:
+			candidate.degradationReason = "probe_failures"
+		default:
+			candidate.degradationReason = "low_success_rate"
+		}
+	case candidate.burstFailure || probe.consecutiveFailures == 1 || (candidate.sampleCount >= profitPriorityMinSamples && candidate.successRate != nil && *candidate.successRate < 0.90):
 		candidate.stabilityTier, candidate.stabilityRank = "warning", 2
+		if candidate.burstFailure {
+			candidate.degradationReason = "error_burst"
+		} else if probe.consecutiveFailures == 1 {
+			candidate.degradationReason = "probe_failure"
+		} else {
+			candidate.degradationReason = "low_success_rate"
+		}
 	case candidate.sampleCount < profitPriorityMinSamples:
 		candidate.stabilityTier, candidate.stabilityRank = "unknown", 1
 	default:
@@ -505,6 +574,18 @@ func prepareProfitPriorityState(now time.Time, candidate *profitPriorityCandidat
 		math.Abs(*stored.EffectiveCost-candidate.effectiveCost) > 1e-9
 	cost := candidate.effectiveCost
 	stored.EffectiveCost = &cost
+	if !candidate.runtimeComplete {
+		candidate.successRate = stored.SuccessRate
+		candidate.latencyMs = stored.LatencyMs
+		candidate.stabilityTier = stored.StabilityTier
+		candidate.stabilityRank = profitPriorityStabilityRank(stored.StabilityTier)
+		return stored
+	}
+	if candidate.lastFailureAt != nil && (stored.LastUpstreamErrorAt == nil || candidate.lastFailureAt.After(*stored.LastUpstreamErrorAt)) {
+		failureAt := *candidate.lastFailureAt
+		stored.LastUpstreamErrorAt = &failureAt
+		stored.LastUpstreamErrorClass = candidate.lastFailureClass
+	}
 
 	accepted := stored.LastObservedAt == nil || now.Sub(*stored.LastObservedAt) >= profitPriorityObservationInterval
 	if accepted {
@@ -514,13 +595,40 @@ func prepareProfitPriorityState(now time.Time, candidate *profitPriorityCandidat
 		stored.SampleCount = candidate.sampleCount
 		stored.SuccessRate = profitPrioritySmoothFloat(stored.SuccessRate, candidate.successRate)
 		stored.LatencyMs = profitPrioritySmoothInt(stored.LatencyMs, candidate.latencyMs)
+		stored.ShortErrorCount = candidate.shortErrors
+		stored.ShortErrorRate = candidate.shortRate
 	}
 
 	if candidate.hardFailure {
 		candidate.emergency = stored.StabilityTier != "unstable"
 		stored.StabilityTier = "unstable"
+		stored.DegradationReason = candidate.degradationReason
+		stored.CleanRecoveryRounds = 0
 		stored.ObservedStabilityTier = "unstable"
 		stored.ObservedStabilityRounds = 0
+	} else if candidate.burstFailure {
+		if stored.StabilityTier != "unstable" {
+			candidate.emergency = stored.StabilityTier != "warning"
+			stored.StabilityTier = "warning"
+		}
+		stored.DegradationReason = candidate.degradationReason
+		stored.CleanRecoveryRounds = 0
+		stored.ObservedStabilityTier = stored.StabilityTier
+		stored.ObservedStabilityRounds = 0
+	} else if stored.StabilityTier == "warning" || stored.StabilityTier == "unstable" {
+		if accepted && profitPriorityRecoveryReady(now, candidate, stored) {
+			stored.CleanRecoveryRounds++
+			if stored.CleanRecoveryRounds >= profitPriorityRecoveryRounds {
+				stored.StabilityTier = "stable"
+				stored.DegradationReason = ""
+				stored.CleanRecoveryRounds = 0
+				stored.ObservedStabilityTier = "stable"
+				stored.ObservedStabilityRounds = 0
+				candidate.emergency = true
+			}
+		} else if accepted {
+			stored.CleanRecoveryRounds = 0
+		}
 	} else if accepted && candidate.sampleCount >= profitPriorityMinSamples {
 		target := profitPriorityTargetTier(stored.StabilityTier, stored.SuccessRate, candidate.probeFailures)
 		if target == stored.StabilityTier {
@@ -539,6 +647,11 @@ func prepareProfitPriorityState(now time.Time, candidate *profitPriorityCandidat
 			}
 			if stored.ObservedStabilityRounds >= required {
 				stored.StabilityTier = target
+				if target == "stable" {
+					stored.DegradationReason = ""
+				} else {
+					stored.DegradationReason = candidate.degradationReason
+				}
 				stored.ObservedStabilityRounds = 0
 			}
 		}
@@ -549,6 +662,20 @@ func prepareProfitPriorityState(now time.Time, candidate *profitPriorityCandidat
 	candidate.stabilityTier = stored.StabilityTier
 	candidate.stabilityRank = profitPriorityStabilityRank(stored.StabilityTier)
 	return stored
+}
+
+func profitPriorityRecoveryReady(now time.Time, candidate *profitPriorityCandidate, stored ProfitPriorityState) bool {
+	if candidate.probeFailures > 0 {
+		return false
+	}
+	if stored.LastUpstreamErrorAt != nil && now.Sub(*stored.LastUpstreamErrorAt) < profitPriorityRecoveryCleanPeriod {
+		return false
+	}
+	if candidate.sampleCount >= profitPriorityMinSamples && candidate.successRate != nil &&
+		*candidate.successRate >= profitPriorityRecoverySuccessRate {
+		return true
+	}
+	return candidate.cleanSuccesses >= profitPriorityRecoveryMinSuccesses
 }
 
 func profitPrioritySmoothFloat(previous, current *float64) *float64 {
@@ -599,6 +726,11 @@ func profitPriorityStabilityRank(tier string) int {
 }
 
 func profitPriorityComponentReady(now time.Time, ranked []*profitPriorityCandidate, states map[string]ProfitPriorityState, base int) bool {
+	for _, candidate := range ranked {
+		if !candidate.runtimeComplete {
+			return false
+		}
+	}
 	for _, candidate := range ranked {
 		if candidate.emergency || candidate.costChanged {
 			return true
@@ -720,6 +852,8 @@ func (s *Service) applyProfitPriority(ctx context.Context, repo profitPriorityRe
 	stored.StabilityTier = candidate.stabilityTier
 	stored.SuccessRate = candidate.successRate
 	stored.LatencyMs = candidate.latencyMs
+	stored.ShortErrorCount = candidate.shortErrors
+	stored.ShortErrorRate = candidate.shortRate
 	cost := candidate.effectiveCost
 	stored.EffectiveCost = &cost
 	if stored.Conflict {
@@ -756,6 +890,8 @@ func (s *Service) applyProfitPriority(ctx context.Context, repo profitPriorityRe
 	}
 	stored.LastAppliedPriority = desired
 	stored.PendingPriority = nil
+	changedAt := time.Now()
+	stored.LastPriorityChangeAt = &changedAt
 	cooldownUntil := time.Now().Add(profitPriorityCooldown)
 	stored.CooldownUntil = &cooldownUntil
 	if err := repo.UpsertProfitPriorityState(ctx, stored); err != nil {

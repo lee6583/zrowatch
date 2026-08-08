@@ -502,12 +502,13 @@ func (s *PlatformService) FetchSub2APIAdminAccountUsageStats(session Session, ac
 }
 
 // Sub2APIAccountRuntimeSample is a non-sensitive request outcome used by the
-// downstream priority controller. The usage API only returns completed usage
-// rows, so failures that never produced a row are supplied by ZroWatch probes.
+// downstream priority controller.
 type Sub2APIAccountRuntimeSample struct {
-	Success   bool
-	LatencyMs *int
-	CreatedAt time.Time
+	Success      bool
+	LatencyMs    *int
+	StatusCode   *int
+	FailureClass string
+	CreatedAt    time.Time
 }
 
 // FetchSub2APIAdminAccountRuntimeSamples returns the newest completed text
@@ -555,7 +556,12 @@ func (s *PlatformService) FetchSub2APIAdminAccountRuntimeSamples(session Session
 			if !attributable {
 				continue
 			}
-			result = append(result, Sub2APIAccountRuntimeSample{Success: success, LatencyMs: firstToken, CreatedAt: *createdAt})
+			sample := Sub2APIAccountRuntimeSample{Success: success, LatencyMs: firstToken, CreatedAt: *createdAt}
+			if !success {
+				sample.StatusCode = sub2APIUpstreamStatusCode(record)
+				sample.FailureClass = sub2APIUpstreamFailureClass(record)
+			}
+			result = append(result, sample)
 			if len(result) == limit {
 				break
 			}
@@ -571,15 +577,23 @@ func (s *PlatformService) FetchSub2APIAdminAccountRuntimeSamples(session Session
 		"&sort_by=created_at&sort_order=desc&view=all&account_id=" + url.QueryEscape(accountID) +
 		"&start_time=" + url.QueryEscape(since.UTC().Format(time.RFC3339Nano)) +
 		"&end_time=" + url.QueryEscape(time.Now().UTC().Format(time.RFC3339Nano))
-	if errorResponse, errorRequestErr := s.httpClient.requestJSON(errorURL, adminAuthOptions(session)); errorRequestErr == nil {
-		for _, item := range dataArray(errorResponse.Payload) {
-			record := dataRecord(item)
-			createdAt := parseFlexibleTime(firstAny(record, []string{"created_at", "createdAt"}))
-			if createdAt == nil || createdAt.Before(since) || !sub2APIUpstreamErrorAttributable(record) {
-				continue
-			}
-			result = append(result, Sub2APIAccountRuntimeSample{Success: false, CreatedAt: *createdAt})
+	errorResponse, errorRequestErr := s.httpClient.requestJSON(errorURL, adminAuthOptions(session))
+	if errorRequestErr != nil {
+		// Missing provider-error data must not be interpreted as a clean account,
+		// otherwise a temporarily unavailable monitoring endpoint can restore a
+		// degraded account prematurely.
+		return nil, errorRequestErr
+	}
+	for _, item := range dataArray(errorResponse.Payload) {
+		record := dataRecord(item)
+		createdAt := parseFlexibleTime(firstAny(record, []string{"created_at", "createdAt"}))
+		if createdAt == nil || createdAt.Before(since) || !sub2APIUpstreamErrorAttributable(record) {
+			continue
 		}
+		result = append(result, Sub2APIAccountRuntimeSample{
+			Success: false, StatusCode: sub2APIUpstreamStatusCode(record),
+			FailureClass: sub2APIUpstreamFailureClass(record), CreatedAt: *createdAt,
+		})
 	}
 	sort.SliceStable(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
 	if len(result) > limit {
@@ -589,22 +603,55 @@ func (s *PlatformService) FetchSub2APIAdminAccountRuntimeSamples(session Session
 }
 
 func sub2APIUpstreamErrorAttributable(record map[string]any) bool {
-	if status := firstInt(record, []string{"upstream_status_code", "upstreamStatusCode", "status_code", "statusCode"}); status != nil && *status != 0 {
-		return *status == http.StatusUnauthorized || *status == http.StatusForbidden || *status == http.StatusRequestTimeout ||
-			*status == http.StatusTooManyRequests || *status >= 500
+	return sub2APIUpstreamFailureClass(record) != ""
+}
+
+func sub2APIUpstreamStatusCode(record map[string]any) *int {
+	status := firstInt(record, []string{"upstream_status_code", "upstreamStatusCode", "status_code", "statusCode"})
+	if status == nil || *status == 0 {
+		return nil
+	}
+	value := *status
+	return &value
+}
+
+func sub2APIUpstreamFailureClass(record map[string]any) string {
+	if status := sub2APIUpstreamStatusCode(record); status != nil {
+		switch {
+		case *status == http.StatusUnauthorized || *status == http.StatusForbidden:
+			return "auth"
+		case *status == http.StatusRequestTimeout:
+			return "timeout"
+		case *status == http.StatusTooManyRequests:
+			return "rate_limit"
+		case *status >= 500:
+			return "server"
+		default:
+			return ""
+		}
 	}
 	phase := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"phase", "error_phase", "errorPhase"})))
 	owner := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"error_owner", "errorOwner"})))
-	typeName := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"type", "error_type", "errorType"})))
-	if phase == "account_auth" || phase == "upstream" || owner == "provider" {
-		return true
+	typeName := strings.ToLower(strings.TrimSpace(firstStringy(record, []string{"type", "error_type", "errorType", "error_category", "errorCategory"})))
+	if phase == "account_auth" || strings.Contains(typeName, "auth") || strings.Contains(typeName, "credential") {
+		return "auth"
 	}
-	for _, marker := range []string{"timeout", "rate_limit", "rate-limit", "auth", "network", "server", "transport", "credential"} {
-		if strings.Contains(typeName, marker) {
-			return true
-		}
+	if strings.Contains(typeName, "timeout") {
+		return "timeout"
 	}
-	return false
+	if strings.Contains(typeName, "rate_limit") || strings.Contains(typeName, "rate-limit") {
+		return "rate_limit"
+	}
+	if strings.Contains(typeName, "network") || strings.Contains(typeName, "transport") {
+		return "transport"
+	}
+	if strings.Contains(typeName, "server") {
+		return "server"
+	}
+	if phase == "upstream" || owner == "provider" {
+		return "upstream"
+	}
+	return ""
 }
 
 func sub2APIAccountRuntimeOutcome(record map[string]any, firstToken *int, outputTokens *float64) (success bool, attributable bool) {
