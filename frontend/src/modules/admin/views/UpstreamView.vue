@@ -75,7 +75,13 @@ const connectedGroupKeys = ref(new Set<string>())
 const downstreamConsumptionBySite = ref(new Map<string, DownstreamConsumptionItem>())
 const isLoadingDownstreamConsumption = ref(false)
 const downstreamConsumptionError = ref<string | null>(null)
-const groupTargetKey = (siteId: string, groupName: string): string => `${siteId}\u0000${groupName}`
+const groupTargetKey = (siteId: string, groupValue: string): string => `${siteId}\u0000${groupValue.trim()}`
+const addConnectedGroupKeys = (keys: Set<string>, siteId: string, groupId?: string, groupName?: string): void => {
+  const normalizedSiteId = siteId.trim()
+  if (!normalizedSiteId) return
+  if (groupId?.trim()) keys.add(groupTargetKey(normalizedSiteId, groupId))
+  if (groupName?.trim()) keys.add(groupTargetKey(normalizedSiteId, groupName))
+}
 const isAddModalOpen = ref(false)
 const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
@@ -243,7 +249,7 @@ const connectedGroupTypes = computed(() => {
   for (const site of upstreamSites.value) {
     for (const group of site.metrics.groups) {
       const type = group.platform?.trim()
-      if (type && connectedGroupKeys.value.has(groupTargetKey(site.id, group.name))) types.add(type)
+      if (type && isGroupConnectedForSite(site.id, group)) types.add(type)
     }
   }
   return Array.from(types).sort((first, second) => first.localeCompare(second))
@@ -333,12 +339,12 @@ const loadConnectedGroupKeys = async () => {
 
     for (const mapping of mappingOptions.mappings ?? []) {
       for (const target of mapping.upstreamTargets ?? []) {
-        nextKeys.add(groupTargetKey(target.siteId, target.groupName))
+        addConnectedGroupKeys(nextKeys, target.siteId, undefined, target.groupName)
       }
     }
     for (const connection of realConnections) {
       if (connection.status && connection.status !== 'active') continue
-      nextKeys.add(groupTargetKey(connection.upstreamSiteId, connection.upstreamGroupName))
+      addConnectedGroupKeys(nextKeys, connection.upstreamSiteId, connection.upstreamGroupId, connection.upstreamGroupName)
     }
 
     connectedGroupKeys.value = nextKeys
@@ -413,11 +419,16 @@ const groupedGroups = computed<Record<string, UpstreamGroupInfo[]>>(() => {
 
 const isGroupConnected = (group: UpstreamGroupInfo): boolean => {
   if (!selectedSiteForGroups.value) return false
-  return connectedGroupKeys.value.has(groupTargetKey(selectedSiteForGroups.value.id, group.name))
+  return isGroupConnectedForSite(selectedSiteForGroups.value.id, group)
 }
 
+const isGroupConnectedForSite = (siteId: string, group: UpstreamGroupInfo): boolean => (
+  connectedGroupKeys.value.has(groupTargetKey(siteId, group.id)) ||
+  connectedGroupKeys.value.has(groupTargetKey(siteId, group.name))
+)
+
 const connectedGroupsForSite = (site: UpstreamSite): UpstreamGroupInfo[] => (
-  site.metrics.groups.filter(group => connectedGroupKeys.value.has(groupTargetKey(site.id, group.name)))
+  site.metrics.groups.filter(group => isGroupConnectedForSite(site.id, group))
 )
 
 const connectedGroupPreview = (site: UpstreamSite): string => {
