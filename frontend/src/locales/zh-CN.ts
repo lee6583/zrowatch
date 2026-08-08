@@ -1651,7 +1651,7 @@ export default {
       },
       filters: {
         searchLabel: '搜索',
-        searchPlaceholder: '搜索站点或分组...',
+        searchPlaceholder: '搜索站点、URL 或分组...',
         typeLabel: '分组类型',
         platformLabel: '站点平台',
         downstreamGroupLabel: '下游公开分组筛选',

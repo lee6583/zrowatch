@@ -231,6 +231,7 @@ func (r *Repository) InsertSnapshots(ctx context.Context, records []snapshotReco
 
 func (r *Repository) List(ctx context.Context, userID string, adminAccountID string, query ListQuery) (listRecords, error) {
 	search := strings.ToLower(strings.TrimSpace(query.Search))
+	urlSearch := normalizeSiteURLSearchValue(search)
 	filterType := strings.TrimSpace(query.Type)
 	filterPlatform := strings.TrimSpace(query.Platform)
 	filterOwnGroupID := strings.TrimSpace(query.OwnGroupID)
@@ -268,6 +269,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 				snapshots.multiplier,
 				snapshots.deleted,
 				COALESCE(sites.recharge_rate, 1) AS recharge_rate,
+				COALESCE(sites.base_url, '') AS site_url,
 				snapshots.created_at,
 				COALESCE(snapshots.last_seen_at, snapshots.created_at) AS last_seen_at,
 				COALESCE(sites.base_url, snapshots.site_id) AS site_key,
@@ -290,6 +292,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 				multiplier,
 				deleted,
 				recharge_rate,
+				site_url,
 				created_at,
 				last_seen_at,
 				ROW_NUMBER() OVER (
@@ -302,7 +305,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 				) AS previous_multiplier
 			FROM enriched
 		), latest AS (
-			SELECT id, user_id, site_id, site_name, group_id, group_name, platform, type, multiplier, deleted, recharge_rate, created_at, last_seen_at, previous_multiplier
+			SELECT id, user_id, site_id, site_name, group_id, group_name, platform, type, multiplier, deleted, recharge_rate, site_url, created_at, last_seen_at, previous_multiplier
 			FROM ranked
 			WHERE row_number = 1
 		), mapped AS (
@@ -339,10 +342,10 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 		), base_filtered AS (
 			SELECT *
 			FROM mapped
-			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%')
-				AND ($4 = '' OR type = $4)
-				AND ($5 = '' OR platform = $5)
-				AND ($6 = '' OR EXISTS (
+			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%' OR lower(site_url) LIKE '%' || $3 || '%' OR ($4 <> '' AND lower(site_url) LIKE '%' || $4 || '%'))
+				AND ($5 = '' OR type = $5)
+				AND ($6 = '' OR platform = $6)
+				AND ($7 = '' OR EXISTS (
 					SELECT 1
 					FROM real_connections AS own_group_connections
 					WHERE own_group_connections.user_id = mapped.user_id
@@ -353,16 +356,16 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 							OR ((own_group_connections.upstream_group_id = '' OR mapped.group_id = '')
 								AND own_group_connections.upstream_group_name = mapped.group_name)
 						)
-						AND own_group_connections.own_group_ids @> jsonb_build_array($6::text)
+						AND own_group_connections.own_group_ids @> jsonb_build_array($7::text)
 				))
 		), filtered AS (
 			SELECT *
 			FROM base_filtered
-			WHERE ($7 = 'legacy')
-				OR ($7 = 'all' AND NOT deleted)
-				OR ($7 = 'mapped' AND mapped AND NOT deleted)
-				OR ($7 = 'unmapped' AND NOT mapped AND NOT deleted)
-				OR ($7 = 'deleted' AND deleted)
+			WHERE ($8 = 'legacy')
+				OR ($8 = 'all' AND NOT deleted)
+				OR ($8 = 'mapped' AND mapped AND NOT deleted)
+				OR ($8 = 'unmapped' AND NOT mapped AND NOT deleted)
+				OR ($8 = 'deleted' AND deleted)
 		), facets AS (
 			SELECT
 				COALESCE(array_agg(DISTINCT type ORDER BY type) FILTER (WHERE type <> ''), ARRAY[]::text[]) AS types,
@@ -377,15 +380,15 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 		CROSS JOIN counted
 		CROSS JOIN facets
 		ORDER BY
-			CASE WHEN $8 = 'multiplierAsc' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
-			CASE WHEN $8 = 'multiplierDesc' THEN filtered.multiplier * filtered.recharge_rate END DESC NULLS LAST,
-			CASE WHEN $8 = 'siteNameAsc' THEN lower(filtered.site_name) END ASC,
-			CASE WHEN $8 = 'groupNameAsc' THEN lower(filtered.group_name) END ASC,
-			CASE WHEN $8 = 'default' THEN CASE WHEN filtered.mapped THEN 1 ELSE 0 END END DESC,
-			CASE WHEN $8 = 'default' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
+			CASE WHEN $9 = 'multiplierAsc' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
+			CASE WHEN $9 = 'multiplierDesc' THEN filtered.multiplier * filtered.recharge_rate END DESC NULLS LAST,
+			CASE WHEN $9 = 'siteNameAsc' THEN lower(filtered.site_name) END ASC,
+			CASE WHEN $9 = 'groupNameAsc' THEN lower(filtered.group_name) END ASC,
+			CASE WHEN $9 = 'default' THEN CASE WHEN filtered.mapped THEN 1 ELSE 0 END END DESC,
+			CASE WHEN $9 = 'default' THEN filtered.multiplier * filtered.recharge_rate END ASC NULLS LAST,
 			filtered.site_name ASC, filtered.group_name ASC, filtered.platform ASC, filtered.type ASC
-		LIMIT $9 OFFSET $10
-	`, userID, adminAccountID, search, filterType, filterPlatform, filterOwnGroupID, filterStatus, sortMode, query.PageSize, offset)
+		LIMIT $10 OFFSET $11
+	`, userID, adminAccountID, search, urlSearch, filterType, filterPlatform, filterOwnGroupID, filterStatus, sortMode, query.PageSize, offset)
 	if err != nil {
 		return listRecords{}, err
 	}
@@ -401,7 +404,7 @@ func (r *Repository) List(ctx context.Context, userID string, adminAccountID str
 		result.Types = facets.Types
 		result.Platforms = facets.Platforms
 	}
-	counts, err := r.statusCounts(ctx, userID, adminAccountID, search, filterType, filterPlatform, filterOwnGroupID)
+	counts, err := r.statusCounts(ctx, userID, adminAccountID, search, urlSearch, filterType, filterPlatform, filterOwnGroupID)
 	if err != nil {
 		return listRecords{}, err
 	}
@@ -621,7 +624,7 @@ func (r *Repository) facets(ctx context.Context, userID string, adminAccountID s
 // statusCounts calculates status-tab totals using the same current-row and
 // mapped semantics as List. Search/type/platform remain active so tab counts
 // always describe the result set the operator is currently inspecting.
-func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccountID string, search string, filterType string, filterPlatform string, filterOwnGroupID string) (StatusCounts, error) {
+func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccountID string, search string, urlSearch string, filterType string, filterPlatform string, filterOwnGroupID string) (StatusCounts, error) {
 	var counts StatusCounts
 	err := r.db.QueryRow(ctx, `
 		WITH enriched AS (
@@ -635,6 +638,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 				snapshots.platform,
 				snapshots.type,
 				snapshots.deleted,
+				COALESCE(sites.base_url, '') AS site_url,
 				snapshots.created_at,
 				COALESCE(sites.base_url, snapshots.site_id) AS site_key,
 				COALESCE(NULLIF(snapshots.group_id, ''), snapshots.group_name) AS group_key
@@ -669,10 +673,10 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			FROM latest
 		), base_filtered AS (
 			SELECT * FROM mapped
-			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%')
-				AND ($4 = '' OR type = $4)
-				AND ($5 = '' OR platform = $5)
-				AND ($6 = '' OR EXISTS (
+			WHERE ($3 = '' OR lower(site_name) LIKE '%' || $3 || '%' OR lower(group_name) LIKE '%' || $3 || '%' OR lower(platform) LIKE '%' || $3 || '%' OR lower(type) LIKE '%' || $3 || '%' OR lower(site_url) LIKE '%' || $3 || '%' OR ($4 <> '' AND lower(site_url) LIKE '%' || $4 || '%'))
+				AND ($5 = '' OR type = $5)
+				AND ($6 = '' OR platform = $6)
+				AND ($7 = '' OR EXISTS (
 					SELECT 1
 					FROM real_connections AS own_group_connections
 					WHERE own_group_connections.user_id = mapped.user_id
@@ -683,7 +687,7 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 							OR ((own_group_connections.upstream_group_id = '' OR mapped.group_id = '')
 								AND own_group_connections.upstream_group_name = mapped.group_name)
 						)
-						AND own_group_connections.own_group_ids @> jsonb_build_array($6::text)
+						AND own_group_connections.own_group_ids @> jsonb_build_array($7::text)
 				))
 		)
 		SELECT
@@ -692,13 +696,21 @@ func (r *Repository) statusCounts(ctx context.Context, userID string, adminAccou
 			count(*) FILTER (WHERE NOT mapped AND NOT deleted)::int,
 			count(*) FILTER (WHERE deleted)::int
 		FROM base_filtered
-	`, userID, adminAccountID, search, filterType, filterPlatform, filterOwnGroupID).Scan(
+	`, userID, adminAccountID, search, urlSearch, filterType, filterPlatform, filterOwnGroupID).Scan(
 		&counts.All,
 		&counts.Mapped,
 		&counts.Unmapped,
 		&counts.Deleted,
 	)
 	return counts, err
+}
+
+func normalizeSiteURLSearchValue(value string) string {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	normalized = strings.TrimPrefix(normalized, "https://")
+	normalized = strings.TrimPrefix(normalized, "http://")
+	normalized = strings.TrimPrefix(normalized, "www.")
+	return strings.TrimRight(normalized, "/")
 }
 
 func newSnapshotID() (string, error) {

@@ -2,8 +2,10 @@ package my_sites
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -242,10 +244,16 @@ func (s *Service) deleteUpstreamCredential(session upstream.Session, keyID strin
 	if strings.TrimSpace(keyID) == "" {
 		return nil
 	}
+	var err error
 	if session.Platform == upstream.PlatformNewAPI {
-		return s.platformService.DeleteNewAPIToken(session, keyID)
+		err = s.platformService.DeleteNewAPIToken(session, keyID)
+	} else {
+		err = s.platformService.DeleteSub2APIKey(session, keyID)
 	}
-	return s.platformService.DeleteSub2APIKey(session, keyID)
+	if isRemoteNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 func (s *Service) createAdminResource(connectionCtx connectionContext, requestedChannelType int, ownGroupIDs []string, key string) (string, string, error) {
@@ -277,10 +285,24 @@ func (s *Service) deleteAdminResource(session upstream.Session, resourceID strin
 	if strings.TrimSpace(resourceID) == "" {
 		return nil
 	}
+	var err error
 	if session.Platform == upstream.PlatformNewAPI {
-		return s.platformService.DeleteNewAPIChannel(session, resourceID)
+		err = s.platformService.DeleteNewAPIChannel(session, resourceID)
+	} else {
+		err = s.platformService.DeleteSub2APIAdminAccount(session, resourceID)
 	}
-	return s.platformService.DeleteSub2APIAdminAccount(session, resourceID)
+	if isRemoteNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+func isRemoteNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	var requestErr *upstream.RequestError
+	return errors.As(err, &requestErr) && requestErr.StatusCode == http.StatusNotFound
 }
 
 func (s *Service) persistConnection(ctx context.Context, conn RealConnection) error {
@@ -707,6 +729,13 @@ func (s *Service) realDisconnectConnection(ctx context.Context, userID string, r
 	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
 	if err != nil {
 		return err
+	}
+	return s.realDisconnectConnectionForAdmin(ctx, userID, adminAccountID, req)
+}
+
+func (s *Service) realDisconnectConnectionForAdmin(ctx context.Context, userID, adminAccountID string, req RealDisconnectRequest) error {
+	if strings.TrimSpace(req.ConnectionID) == "" || (req.Mode != "unlink" && req.Mode != "full") || s.connRepository == nil {
+		return requestError(ErrorRequest)
 	}
 	conn, err := s.connRepository.GetRealConnection(ctx, req.ConnectionID, userID, adminAccountID)
 	if err != nil {

@@ -1651,7 +1651,7 @@ export default {
       },
       filters: {
         searchLabel: 'Search',
-        searchPlaceholder: 'Search site or group...',
+        searchPlaceholder: 'Search site, URL, or group...',
         typeLabel: 'Group Type',
         platformLabel: 'Site Platform',
         downstreamGroupLabel: 'Downstream public group filter',

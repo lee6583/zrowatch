@@ -164,6 +164,35 @@ func TestRepositoryListFiltersByOwnGroupIDWithPostgres(t *testing.T) {
 	}
 }
 
+func TestRepositoryListSearchesByUpstreamURLWithPostgres(t *testing.T) {
+	pool := openPostgresTestPool(t)
+	repository := prepareGroupRatesRepository(t, pool)
+	insertSnapshot(t, pool, "workspace-a", "54")
+
+	ctx, cancel := context.WithTimeout(context.Background(), postgresTestTimeout)
+	defer cancel()
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO upstream_sites (id, user_id, admin_account_id, base_url, recharge_rate)
+		VALUES ('site-a', 'user-a', 'workspace-a', 'https://api.unique-example.test/v1', 1)
+	`); err != nil {
+		t.Fatalf("insert upstream site: %v", err)
+	}
+
+	matched, err := repository.List(ctx, "user-a", "workspace-a", ListQuery{
+		Page: 1, PageSize: 10, Status: "unmapped", Search: "HTTPS://API.UNIQUE-EXAMPLE.TEST/v1/",
+	})
+	if err != nil || len(matched.Items) != 1 || matched.Total != 1 || matched.StatusCounts.Unmapped != 1 {
+		t.Fatalf("URL search result = %#v, err=%v", matched, err)
+	}
+
+	unmatched, err := repository.List(ctx, "user-a", "workspace-a", ListQuery{
+		Page: 1, PageSize: 10, Status: "unmapped", Search: "other-example.test",
+	})
+	if err != nil || len(unmatched.Items) != 0 || unmatched.Total != 0 || unmatched.StatusCounts.Unmapped != 0 {
+		t.Fatalf("unmatched URL search result = %#v, err=%v", unmatched, err)
+	}
+}
+
 func TestLegacyRealConnectionWorkspaceIsAssignedInPostgres(t *testing.T) {
 	pool := openPostgresTestPool(t)
 	ctx, cancel := context.WithTimeout(context.Background(), postgresTestTimeout)

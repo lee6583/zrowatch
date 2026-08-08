@@ -78,6 +78,36 @@ type UpstreamSiteLookup interface {
 	GetSite(ctx context.Context, siteID string) (*upstream.Site, error)
 }
 
+// CleanupSiteConnections is called before an upstream site is deleted. The
+// explicit workspace ID prevents a concurrent browser workspace switch from
+// changing the scope of this cleanup.
+func (s *Service) CleanupSiteConnections(ctx context.Context, userID, adminAccountID, siteID string) error {
+	if s.connRepository == nil {
+		return nil
+	}
+	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
+	if err != nil {
+		return err
+	}
+	for _, conn := range connections {
+		if conn.UpstreamSiteID != strings.TrimSpace(siteID) {
+			continue
+		}
+		mode := "unlink"
+		if conn.ProvisioningMode == ProvisioningModeManaged ||
+			(conn.ProvisioningMode == ProvisioningModeLegacy && strings.TrimSpace(conn.AdminAccountID) != "") {
+			mode = "full"
+		}
+		if err := s.realDisconnectConnectionForAdmin(ctx, userID, adminAccountID, RealDisconnectRequest{
+			ConnectionID: conn.ID,
+			Mode:         mode,
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BotNotifier 机器人通知发送接口，由 settings.Service 实现。
 // 自动调价成功后通过此接口向用户配置的机器人发送通知。
 type BotNotifier interface {

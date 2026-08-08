@@ -89,6 +89,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	upstreamService.SetAdminAccountResolver(adminAccountsService)
 	upstream.RegisterRoutes(server.mux, upstreamService, adminAccountsService)
 	mySitesService := my_sites.NewService(my_sites.NewRepository(db), platformService, upstreamService)
+	upstreamService.SetSiteConnectionCleaner(mySitesService)
 	if err := mySitesService.EnsureSchema(context.Background()); err != nil {
 		panic(err)
 	}

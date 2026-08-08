@@ -1633,14 +1633,24 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
         </div>
 
         <div class="w-full">
-          <Select v-model="typeFilter" @change="handleTypeChange">
+          <Select
+            v-model="typeFilter"
+            :menu-min-width="180"
+            :wrap-options="true"
+            @change="handleTypeChange"
+          >
             <option value="">{{ t('admin.groupRates.common.allTypes') }}</option>
             <option v-for="type in types" :key="type" :value="type">{{ typeLabel(type) }}</option>
           </Select>
         </div>
 
         <div class="w-full">
-          <Select v-model="platformFilter" @change="handlePlatformChange">
+          <Select
+            v-model="platformFilter"
+            :menu-min-width="180"
+            :wrap-options="true"
+            @change="handlePlatformChange"
+          >
             <option value="">{{ t('admin.groupRates.common.allPlatforms') }}</option>
             <option v-for="platform in platforms" :key="platform" :value="platform">{{ platformLabel(platform) }}</option>
           </Select>

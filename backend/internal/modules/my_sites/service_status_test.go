@@ -140,6 +140,65 @@ func (l testUpstreamLookup) GetSite(ctx context.Context, siteID string) (*upstre
 	return nil, nil
 }
 
+func TestCleanupSiteConnectionsDeletesManagedRemoteResources(t *testing.T) {
+	var deletedAccount, deletedKey bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/api/v1/auth/me":
+			writeConnectionTestJSON(w, map[string]any{"data": map[string]any{"role": "admin"}})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/admin/accounts/42":
+			deletedAccount = true
+			writeConnectionTestJSON(w, map[string]any{"success": true})
+		case r.Method == http.MethodDelete && r.URL.Path == "/api/v1/keys/7":
+			deletedKey = true
+			writeConnectionTestJSON(w, map[string]any{"success": true})
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.String())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	session := platformTestSession(upstream.PlatformSub2API, server.URL)
+	stateRepo := &testStateRepo{state: &State{UserID: "user-1", AdminAccountID: "admin-1", Session: session}}
+	connRepo := &testConnRepo{stateRepo: stateRepo, connection: &RealConnection{
+		ID: "conn-1", UserID: "user-1", WorkspaceAdminAccountID: "admin-1",
+		UpstreamSiteID: "site-1", UpstreamGroupName: "vip", UpstreamKeyID: "7",
+		AdminAccountID: "42", ProvisioningMode: ProvisioningModeManaged,
+		UpstreamPlatform: string(upstream.PlatformSub2API), AdminPlatform: string(upstream.PlatformSub2API),
+	}}
+	lookup := testUpstreamLookup{sites: map[string]*upstream.Site{
+		"site-1": {ID: "site-1", UserID: "user-1", AdminAccountID: "admin-1", Session: &session},
+	}}
+	service := NewService(stateRepo, upstream.NewPlatformService(upstream.NewHTTPClient(server.Client())), lookup)
+	service.connRepository = connRepo
+
+	if err := service.CleanupSiteConnections(context.Background(), "user-1", "admin-1", "site-1"); err != nil {
+		t.Fatalf("cleanup managed connection: %v", err)
+	}
+	if !deletedAccount || !deletedKey {
+		t.Fatalf("expected remote account and key deletion, account=%t key=%t", deletedAccount, deletedKey)
+	}
+	if connRepo.connection != nil {
+		t.Fatal("expected local managed connection to be deleted")
+	}
+}
+
+func TestCleanupSiteConnectionsOnlyUnlinksExistingBinding(t *testing.T) {
+	connRepo := &testConnRepo{connection: &RealConnection{
+		ID: "conn-1", UserID: "user-1", WorkspaceAdminAccountID: "admin-1",
+		UpstreamSiteID: "site-1", ProvisioningMode: ProvisioningModeExisting,
+	}}
+	service := &Service{connRepository: connRepo}
+
+	if err := service.CleanupSiteConnections(context.Background(), "user-1", "admin-1", "site-1"); err != nil {
+		t.Fatalf("cleanup existing connection: %v", err)
+	}
+	if connRepo.connection != nil {
+		t.Fatal("expected existing binding to be unlinked locally")
+	}
+}
+
 func cloneState(state *State) *State {
 	if state == nil {
 		return nil

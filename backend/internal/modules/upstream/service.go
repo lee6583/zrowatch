@@ -26,6 +26,13 @@ type AdminAccountResolver interface {
 	RequireCurrentID(ctx context.Context, userID string) (string, error)
 }
 
+// SiteConnectionCleaner removes local bindings and remote resources created
+// for an upstream site. It is injected by the assembly layer to keep the
+// upstream module independent from my_sites.
+type SiteConnectionCleaner interface {
+	CleanupSiteConnections(ctx context.Context, userID, adminAccountID, siteID string) error
+}
+
 // RefreshConfig 控制后台定时同步行为，由系统设置模块驱动。
 type RefreshConfig struct {
 	Enabled  bool
@@ -36,15 +43,16 @@ type RefreshConfig struct {
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
 type Service struct {
-	platformService *PlatformService
-	snapshotWriter  SnapshotWriter
-	repository      SiteRepository
-	cache           SiteCache
-	accounts        AdminAccountResolver
-	refreshConfig   RefreshConfig
-	timers          map[string]*time.Timer
-	deletedSites    map[string]struct{}
-	mu              sync.Mutex
+	platformService   *PlatformService
+	snapshotWriter    SnapshotWriter
+	repository        SiteRepository
+	cache             SiteCache
+	accounts          AdminAccountResolver
+	connectionCleaner SiteConnectionCleaner
+	refreshConfig     RefreshConfig
+	timers            map[string]*time.Timer
+	deletedSites      map[string]struct{}
+	mu                sync.Mutex
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
 	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
@@ -52,6 +60,10 @@ type Service struct {
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {
 	s.accounts = accounts
+}
+
+func (s *Service) SetSiteConnectionCleaner(cleaner SiteConnectionCleaner) {
+	s.connectionCleaner = cleaner
 }
 
 // requireCurrentAdminAccountID 解析当前工作区 ID，解析失败时返回错误（fail-closed）。
@@ -932,6 +944,13 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 	}
 	if site.AdminAccountID != aid {
 		return newRequestError(ErrorNotFound, "")
+	}
+	// Keep the site and its session available while remote bindings are removed.
+	// A failure leaves the site intact so the user can retry the cleanup.
+	if s.connectionCleaner != nil {
+		if err := s.connectionCleaner.CleanupSiteConnections(ctx, userID, aid, id); err != nil {
+			return err
+		}
 	}
 
 	s.mu.Lock()
