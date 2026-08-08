@@ -1432,13 +1432,16 @@ export default {
         invalidConnectionDate: '对接记录时间无效',
         multipleErrors: '存在多种统计异常',
         sessionUnavailable: '下游会话或统计接口不可用',
+        persistenceUnavailable: '本地累计保存失败',
+        persistedAmount: '显示最近一次可靠的本地累计值',
       },
       status: {
         connecting: '连接中',
         syncing: '同步中',
         connected: '已连接',
         disabled: '已关闭',
-        error: '异常'
+        error: '异常',
+        errorTooltip: '异常原因：{reason}'
       },
       empty: {
         title: '未找到上游站点',

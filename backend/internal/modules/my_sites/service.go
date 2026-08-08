@@ -35,6 +35,33 @@ type RealConnectionRepository interface {
 	DeleteRealConnection(ctx context.Context, id string, userID string, adminAccountID string) error
 }
 
+// DownstreamConsumptionLedgerEntry stores the local durable view of one
+// Sub2API account's consumption for one upstream site. The observed total is
+// intentionally kept separate from the accumulated amount because Sub2API may
+// remove old usage rows and make its live total decrease.
+type DownstreamConsumptionLedgerEntry struct {
+	UserID            string
+	WorkspaceAdminID  string
+	SiteID            string
+	AccountID         string
+	AccumulatedAmount float64
+	ObservedTotal     float64
+	ObservedAt        time.Time
+}
+
+type DownstreamConsumptionScope struct {
+	UserID           string
+	WorkspaceAdminID string
+}
+
+// DownstreamConsumptionLedgerRepository is optional for lightweight test
+// repositories, but implemented by the production PostgreSQL repository.
+type DownstreamConsumptionLedgerRepository interface {
+	ListDownstreamConsumptionLedger(ctx context.Context, userID, adminAccountID string) ([]DownstreamConsumptionLedgerEntry, error)
+	ObserveDownstreamConsumption(ctx context.Context, entry DownstreamConsumptionLedgerEntry) (float64, error)
+	ListDownstreamConsumptionScopes(ctx context.Context) ([]DownstreamConsumptionScope, error)
+}
+
 type RealConnectionNameUpdater interface {
 	UpdateRealConnectionAdminAccountName(ctx context.Context, id string, userID string, adminAccountID string, name string) error
 }
@@ -152,6 +179,8 @@ type Service struct {
 	onRealConnectionsChanged func(context.Context, string, string)
 }
 
+const downstreamConsumptionSyncInterval = time.Hour
+
 type AdminAccountResolver interface {
 	RequireCurrentID(ctx context.Context, userID string) (string, error)
 }
@@ -194,6 +223,47 @@ func (s *Service) SetBotNotifier(notifier BotNotifier) {
 
 func (s *Service) SetAdminAccountResolver(accounts AdminAccountResolver) {
 	s.accounts = accounts
+}
+
+// StartDownstreamConsumptionScheduler periodically snapshots all workspaces
+// that still have real connections. This keeps the local ledger ahead of a
+// short upstream usage-log retention window even when nobody opens the page.
+func (s *Service) StartDownstreamConsumptionScheduler(ctx context.Context) {
+	ledgerRepo, ok := s.connRepository.(DownstreamConsumptionLedgerRepository)
+	if !ok || ledgerRepo == nil {
+		return
+	}
+	go func() {
+		s.syncDownstreamConsumption(ctx, ledgerRepo)
+		ticker := time.NewTicker(downstreamConsumptionSyncInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.syncDownstreamConsumption(ctx, ledgerRepo)
+			}
+		}
+	}()
+}
+
+func (s *Service) syncDownstreamConsumption(ctx context.Context, ledgerRepo DownstreamConsumptionLedgerRepository) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("[downstream-consumption] scheduler panic recovered: %v", recovered)
+		}
+	}()
+	scopes, err := ledgerRepo.ListDownstreamConsumptionScopes(ctx)
+	if err != nil {
+		log.Printf("[downstream-consumption] list workspaces failed: %v", err)
+		return
+	}
+	for _, scope := range scopes {
+		if _, err := s.downstreamConsumptionForWorkspace(ctx, scope.UserID, scope.WorkspaceAdminID); err != nil {
+			log.Printf("[downstream-consumption] sync failed user_id=%s admin_account_id=%s err=%v", scope.UserID, scope.WorkspaceAdminID, err)
+		}
+	}
 }
 
 // MappingOptions 获取分组映射选项：自有分组通过 admin 接口拉取全量，上游分组从缓存读取。
@@ -718,16 +788,19 @@ const (
 	downstreamConsumptionAccountConflictError    = "admin.upstream.downstreamConsumption.accountConflict"
 	downstreamConsumptionInvalidDateError        = "admin.upstream.downstreamConsumption.invalidConnectionDate"
 	downstreamConsumptionMultipleErrors          = "admin.upstream.downstreamConsumption.multipleErrors"
+	downstreamConsumptionPersistenceError        = "admin.upstream.downstreamConsumption.persistenceUnavailable"
 	downstreamConsumptionSessionUnavailableError = "admin.upstream.downstreamConsumption.sessionUnavailable"
 )
 
 var downstreamConsumptionTimeZone = loadLocationOrUTC(downstreamConsumptionLocation)
 
 type downstreamConsumptionAccount struct {
-	siteID    string
-	accountID string
-	startDate string
-	errorKey  string
+	siteID             string
+	accountID          string
+	startDate          string
+	errorKey           string
+	accumulatedAmount  float64
+	hasPersistedAmount bool
 }
 
 type downstreamConsumptionSite struct {
@@ -735,13 +808,20 @@ type downstreamConsumptionSite struct {
 	conflicts  map[string]struct{}
 	failed     int
 	successful int
-	amount     float64
 	errorKey   string
 }
 
 // DownstreamConsumption 汇总当前 workspace 中真实对接的 Sub2API admin 账号实际扣费。
 // 账号按站点去重，统计起点取该账号最早的真实对接记录创建日期。
 func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (DownstreamConsumptionResponse, error) {
+	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
+	if err != nil {
+		return DownstreamConsumptionResponse{}, err
+	}
+	return s.downstreamConsumptionForWorkspace(ctx, userID, adminAccountID)
+}
+
+func (s *Service) downstreamConsumptionForWorkspace(ctx context.Context, userID, adminAccountID string) (DownstreamConsumptionResponse, error) {
 	response := DownstreamConsumptionResponse{
 		Currency: "CNY",
 		Period:   "since_connection",
@@ -751,13 +831,20 @@ func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (Dow
 		return response, nil
 	}
 
-	adminAccountID, err := s.currentAdminAccountID(ctx, userID)
-	if err != nil {
-		return response, err
-	}
 	connections, err := s.connRepository.ListRealConnections(ctx, userID, adminAccountID)
 	if err != nil {
 		return response, err
+	}
+	ledgerRepo, hasLedger := s.connRepository.(DownstreamConsumptionLedgerRepository)
+	ledgerByKey := make(map[string]DownstreamConsumptionLedgerEntry)
+	if hasLedger {
+		entries, err := ledgerRepo.ListDownstreamConsumptionLedger(ctx, userID, adminAccountID)
+		if err != nil {
+			return response, err
+		}
+		for _, entry := range entries {
+			ledgerByKey[downstreamConsumptionAccountKey(entry.SiteID, entry.AccountID)] = entry
+		}
 	}
 
 	sites := make(map[string]*downstreamConsumptionSite)
@@ -789,6 +876,13 @@ func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (Dow
 			}
 		} else if existing, exists := site.accounts[accountID]; !exists || startDate < existing.startDate || existing.startDate == "" {
 			site.accounts[accountID] = downstreamConsumptionAccount{siteID: siteID, accountID: accountID, startDate: startDate}
+		}
+		if account, exists := site.accounts[accountID]; exists {
+			if entry, ok := ledgerByKey[downstreamConsumptionAccountKey(siteID, accountID)]; ok {
+				account.accumulatedAmount = entry.AccumulatedAmount
+				account.hasPersistedAmount = true
+				site.accounts[accountID] = account
+			}
 		}
 
 		if accountSites[accountID] == nil {
@@ -849,9 +943,10 @@ func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (Dow
 	}
 
 	type result struct {
-		account downstreamConsumptionAccount
-		amount  float64
-		err     error
+		account    downstreamConsumptionAccount
+		amount     float64
+		err        error
+		observedAt time.Time
 	}
 	results := make(chan result)
 	semaphore := make(chan struct{}, 5)
@@ -878,7 +973,7 @@ func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (Dow
 				}
 				amount, queryErr := s.platformService.FetchSub2APIAdminAccountUsageStats(session, account.accountID, account.startDate, time.Now().In(downstreamConsumptionTimeZone).Format("2006-01-02"))
 				<-semaphore
-				results <- result{account: account, amount: amount, err: queryErr}
+				results <- result{account: account, amount: amount, err: queryErr, observedAt: time.Now().UTC()}
 			}()
 		}
 	}
@@ -894,8 +989,29 @@ func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (Dow
 			setDownstreamConsumptionError(site, downstreamConsumptionSafeErrorKey(item.err))
 			continue
 		}
+		if hasLedger {
+			accumulated, observeErr := ledgerRepo.ObserveDownstreamConsumption(ctx, DownstreamConsumptionLedgerEntry{
+				UserID:           userID,
+				WorkspaceAdminID: adminAccountID,
+				SiteID:           item.account.siteID,
+				AccountID:        item.account.accountID,
+				ObservedTotal:    item.amount,
+				ObservedAt:       item.observedAt,
+			})
+			if observeErr != nil {
+				site.failed++
+				setDownstreamConsumptionError(site, downstreamConsumptionPersistenceError)
+				continue
+			}
+			item.account.accumulatedAmount = accumulated
+			item.account.hasPersistedAmount = true
+		}
+		if !hasLedger {
+			item.account.accumulatedAmount = item.amount
+			item.account.hasPersistedAmount = true
+		}
+		site.accounts[item.account.accountID] = item.account
 		site.successful++
-		site.amount += item.amount
 	}
 
 	for _, siteID := range orderedSiteIDs {
@@ -911,18 +1027,27 @@ func (s *Service) DownstreamConsumption(ctx context.Context, userID string) (Dow
 			status = DownstreamConsumptionPartial
 		}
 		item := downstreamConsumptionItemForSite(siteID, site, status)
-		if site.successful > 0 || status == DownstreamConsumptionAvailable {
-			amount := site.amount
-			item.Amount = &amount
-		}
 		items[siteID] = item
 	}
 	response.Items = downstreamConsumptionItemsInOrder(items, orderedSiteIDs)
 	return response, nil
 }
 
+func downstreamConsumptionAccountKey(siteID, accountID string) string {
+	return strings.TrimSpace(siteID) + "\x00" + strings.TrimSpace(accountID)
+}
+
 func downstreamConsumptionItemForSite(siteID string, site *downstreamConsumptionSite, status DownstreamConsumptionStatus) DownstreamConsumptionItem {
-	return DownstreamConsumptionItem{
+	amount := 0.0
+	hasAmount := false
+	for _, account := range site.accounts {
+		if !account.hasPersistedAmount {
+			continue
+		}
+		amount += account.accumulatedAmount
+		hasAmount = true
+	}
+	item := DownstreamConsumptionItem{
 		SiteID:                 siteID,
 		AccountCount:           len(site.accounts),
 		SuccessfulAccountCount: site.successful,
@@ -931,6 +1056,10 @@ func downstreamConsumptionItemForSite(siteID string, site *downstreamConsumption
 		Status:                 status,
 		ErrorKey:               site.errorKey,
 	}
+	if hasAmount {
+		item.Amount = &amount
+	}
+	return item
 }
 
 func setDownstreamConsumptionError(site *downstreamConsumptionSite, errorKey string) {

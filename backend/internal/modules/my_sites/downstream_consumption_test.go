@@ -18,6 +18,49 @@ type downstreamConsumptionConnRepo struct {
 	listWorkspace string
 }
 
+type downstreamConsumptionLedgerConnRepo struct {
+	*downstreamConsumptionConnRepo
+	mu      sync.Mutex
+	entries map[string]DownstreamConsumptionLedgerEntry
+}
+
+func (r *downstreamConsumptionLedgerConnRepo) ListDownstreamConsumptionLedger(_ context.Context, userID, workspaceID string) ([]DownstreamConsumptionLedgerEntry, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	entries := make([]DownstreamConsumptionLedgerEntry, 0)
+	for _, entry := range r.entries {
+		if entry.UserID == userID && entry.WorkspaceAdminID == workspaceID {
+			entries = append(entries, entry)
+		}
+	}
+	return entries, nil
+}
+
+func (r *downstreamConsumptionLedgerConnRepo) ObserveDownstreamConsumption(_ context.Context, entry DownstreamConsumptionLedgerEntry) (float64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := downstreamConsumptionAccountKey(entry.SiteID, entry.AccountID)
+	existing, exists := r.entries[key]
+	if !exists {
+		entry.AccumulatedAmount = entry.ObservedTotal
+		r.entries[key] = entry
+		return entry.AccumulatedAmount, nil
+	}
+	if !entry.ObservedAt.Before(existing.ObservedAt) {
+		if entry.ObservedTotal >= existing.ObservedTotal {
+			existing.AccumulatedAmount += entry.ObservedTotal - existing.ObservedTotal
+		}
+		existing.ObservedTotal = entry.ObservedTotal
+		existing.ObservedAt = entry.ObservedAt
+		r.entries[key] = existing
+	}
+	return existing.AccumulatedAmount, nil
+}
+
+func (r *downstreamConsumptionLedgerConnRepo) ListDownstreamConsumptionScopes(context.Context) ([]DownstreamConsumptionScope, error) {
+	return []DownstreamConsumptionScope{{UserID: "user-1", WorkspaceAdminID: "workspace-1"}}, nil
+}
+
 func (r *downstreamConsumptionConnRepo) SaveRealConnection(context.Context, RealConnection) error {
 	return errors.New("not implemented")
 }
@@ -165,6 +208,73 @@ func TestDownstreamConsumptionMarksNonSub2APIWorkspaceUnsupported(t *testing.T) 
 	}
 	item := downstreamConsumptionItemsBySite(response.Items)["site-a"]
 	assertDownstreamConsumptionItemWithoutAmount(t, item, DownstreamConsumptionUnsupported, 1, 0, 0, 0)
+}
+
+func TestDownstreamConsumptionKeepsLocalTotalWhenUpstreamLogsRollOff(t *testing.T) {
+	var mu sync.Mutex
+	observedCost := 100.0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/me":
+			writeDownstreamConsumptionJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"role": "admin"}})
+		case "/api/v1/admin/usage/stats":
+			mu.Lock()
+			cost := observedCost
+			mu.Unlock()
+			writeDownstreamConsumptionJSON(w, http.StatusOK, map[string]any{"data": map[string]any{"total_actual_cost": cost}})
+		default:
+			writeDownstreamConsumptionJSON(w, http.StatusNotFound, map[string]any{"message": "not found"})
+		}
+	}))
+	defer server.Close()
+
+	repo := &downstreamConsumptionLedgerConnRepo{
+		downstreamConsumptionConnRepo: &downstreamConsumptionConnRepo{connections: []RealConnection{
+			{UpstreamSiteID: "site-a", AdminAccountID: "101", CreatedAt: "2026-08-01T12:00:00Z"},
+		}},
+		entries: make(map[string]DownstreamConsumptionLedgerEntry),
+	}
+	stateRepo := &testStateRepo{state: &State{
+		UserID:         "user-1",
+		AdminAccountID: "workspace-1",
+		Session: upstream.Session{
+			Platform:    upstream.PlatformSub2API,
+			BaseURL:     server.URL,
+			AccessToken: "test-token",
+			TokenType:   "Bearer",
+		},
+	}}
+	service := NewService(stateRepo, upstream.NewPlatformService(upstream.NewHTTPClient(server.Client())), nil)
+	service.connRepository = repo
+	service.SetAdminAccountResolver(testAdminResolver{currentID: "workspace-1"})
+
+	readAmount := func() float64 {
+		response, err := service.DownstreamConsumption(context.Background(), "user-1")
+		if err != nil {
+			t.Fatalf("DownstreamConsumption() error = %v", err)
+		}
+		item := downstreamConsumptionItemsBySite(response.Items)["site-a"]
+		if item.Amount == nil {
+			t.Fatalf("site-a amount is nil, response = %+v", item)
+		}
+		return *item.Amount
+	}
+
+	if got := readAmount(); got != 100 {
+		t.Fatalf("initial amount = %.2f, want 100", got)
+	}
+	mu.Lock()
+	observedCost = 20
+	mu.Unlock()
+	if got := readAmount(); got != 100 {
+		t.Fatalf("retention reset amount = %.2f, want 100", got)
+	}
+	mu.Lock()
+	observedCost = 25
+	mu.Unlock()
+	if got := readAmount(); got != 105 {
+		t.Fatalf("post-reset increment amount = %.2f, want 105", got)
+	}
 }
 
 func downstreamConsumptionItemsBySite(items []DownstreamConsumptionItem) map[string]DownstreamConsumptionItem {

@@ -250,6 +250,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	if err := upstreamService.RestoreSavedSites(context.Background()); err != nil {
 		panic(err)
 	}
+	mySitesService.StartDownstreamConsumptionScheduler(context.Background())
 	massEmailWorker.Start(context.Background())
 	campaignsService.StartScheduler(context.Background())
 	lotteryCtx, lotteryCancel := context.WithCancel(context.Background())

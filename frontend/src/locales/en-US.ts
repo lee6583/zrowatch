@@ -1432,13 +1432,16 @@ export default {
         invalidConnectionDate: 'The connection date is invalid',
         multipleErrors: 'Multiple usage errors occurred',
         sessionUnavailable: 'The downstream session or usage endpoint is unavailable',
+        persistenceUnavailable: 'Unable to save the local cumulative total',
+        persistedAmount: 'Showing the latest reliable locally persisted total',
       },
       status: {
         connecting: 'Connecting',
         syncing: 'Syncing',
         connected: 'Connected',
         disabled: 'Closed',
-        error: 'Error'
+        error: 'Error',
+        errorTooltip: 'Reason: {reason}'
       },
       empty: {
         title: 'No upstream sites found',

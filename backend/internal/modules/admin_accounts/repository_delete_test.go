@@ -50,6 +50,7 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 		"email_templates",
 		"my_site_states",
 		"real_connections",
+		"downstream_consumption_ledger",
 		"dashboard_daily_stats",
 		"dashboard_balance_filter",
 		"upstream_sites",
@@ -74,7 +75,7 @@ func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 			t.Fatalf("%s delete is not scoped by user_id: %s", table, sql)
 		}
 		workspaceColumn := "admin_account_id = $2"
-		if table == "real_connections" {
+		if table == "real_connections" || table == "downstream_consumption_ledger" {
 			workspaceColumn = "workspace_admin_account_id = $2"
 		}
 		if !strings.Contains(sql, workspaceColumn) {
@@ -94,7 +95,7 @@ func TestLegacyWorkspaceDescriptorsCoverDeleteTables(t *testing.T) {
 			t.Fatalf("legacy workspace descriptor missing for delete table %s", stmt.Name)
 		}
 		wantColumn := "admin_account_id"
-		if stmt.Name == "real_connections" {
+		if stmt.Name == "real_connections" || stmt.Name == "downstream_consumption_ledger" {
 			wantColumn = "workspace_admin_account_id"
 		}
 		if column != wantColumn {

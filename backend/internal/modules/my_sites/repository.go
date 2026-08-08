@@ -114,7 +114,118 @@ func (r *Repository) EnsureSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	_, err = r.db.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS downstream_consumption_ledger (
+			user_id text NOT NULL,
+			workspace_admin_account_id text NOT NULL,
+			upstream_site_id text NOT NULL,
+			admin_account_id text NOT NULL,
+			accumulated_amount double precision NOT NULL DEFAULT 0,
+			observed_total double precision NOT NULL DEFAULT 0,
+			observed_at timestamptz NOT NULL DEFAULT now(),
+			created_at timestamptz NOT NULL DEFAULT now(),
+			updated_at timestamptz NOT NULL DEFAULT now(),
+			PRIMARY KEY (user_id, workspace_admin_account_id, upstream_site_id, admin_account_id)
+		)
+	`)
+	if err != nil {
+		return err
+	}
+	_, err = r.db.Exec(ctx, `
+		CREATE INDEX IF NOT EXISTS idx_downstream_consumption_ledger_workspace
+		ON downstream_consumption_ledger (user_id, workspace_admin_account_id, upstream_site_id)
+	`)
+	if err != nil {
+		return err
+	}
 	return nil
+}
+
+func (r *Repository) ListDownstreamConsumptionLedger(ctx context.Context, userID, adminAccountID string) ([]DownstreamConsumptionLedgerEntry, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT user_id, workspace_admin_account_id, upstream_site_id, admin_account_id,
+		       accumulated_amount, observed_total, observed_at
+		FROM downstream_consumption_ledger
+		WHERE user_id = $1 AND workspace_admin_account_id = $2
+	`, userID, adminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	entries := make([]DownstreamConsumptionLedgerEntry, 0)
+	for rows.Next() {
+		var entry DownstreamConsumptionLedgerEntry
+		if err := rows.Scan(
+			&entry.UserID,
+			&entry.WorkspaceAdminID,
+			&entry.SiteID,
+			&entry.AccountID,
+			&entry.AccumulatedAmount,
+			&entry.ObservedTotal,
+			&entry.ObservedAt,
+		); err != nil {
+			return nil, err
+		}
+		entries = append(entries, entry)
+	}
+	return entries, rows.Err()
+}
+
+// ObserveDownstreamConsumption atomically advances one account's local
+// cumulative amount. A lower live total is treated as upstream retention
+// reset, never as a negative charge. observed_at prevents an older concurrent
+// response from moving the baseline backwards.
+func (r *Repository) ObserveDownstreamConsumption(ctx context.Context, entry DownstreamConsumptionLedgerEntry) (float64, error) {
+	var accumulated float64
+	err := r.db.QueryRow(ctx, `
+		INSERT INTO downstream_consumption_ledger (
+			user_id, workspace_admin_account_id, upstream_site_id, admin_account_id,
+			accumulated_amount, observed_total, observed_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $5, $6)
+		ON CONFLICT (user_id, workspace_admin_account_id, upstream_site_id, admin_account_id)
+		DO UPDATE SET
+			accumulated_amount = CASE
+				WHEN EXCLUDED.observed_at < downstream_consumption_ledger.observed_at
+					THEN downstream_consumption_ledger.accumulated_amount
+				WHEN EXCLUDED.observed_total >= downstream_consumption_ledger.observed_total
+					THEN downstream_consumption_ledger.accumulated_amount +
+						(EXCLUDED.observed_total - downstream_consumption_ledger.observed_total)
+				ELSE downstream_consumption_ledger.accumulated_amount
+			END,
+			observed_total = CASE
+				WHEN EXCLUDED.observed_at >= downstream_consumption_ledger.observed_at
+					THEN EXCLUDED.observed_total
+				ELSE downstream_consumption_ledger.observed_total
+			END,
+			observed_at = GREATEST(downstream_consumption_ledger.observed_at, EXCLUDED.observed_at),
+			updated_at = now()
+		RETURNING accumulated_amount
+	`, entry.UserID, entry.WorkspaceAdminID, entry.SiteID, entry.AccountID, entry.ObservedTotal, entry.ObservedAt).Scan(&accumulated)
+	return accumulated, err
+}
+
+func (r *Repository) ListDownstreamConsumptionScopes(ctx context.Context) ([]DownstreamConsumptionScope, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT DISTINCT user_id, workspace_admin_account_id
+		FROM real_connections
+		WHERE user_id <> '' AND workspace_admin_account_id <> ''
+	`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	scopes := make([]DownstreamConsumptionScope, 0)
+	for rows.Next() {
+		var scope DownstreamConsumptionScope
+		if err := rows.Scan(&scope.UserID, &scope.WorkspaceAdminID); err != nil {
+			return nil, err
+		}
+		scopes = append(scopes, scope)
+	}
+	return scopes, rows.Err()
 }
 
 func (r *Repository) Get(ctx context.Context, userID string, adminAccountID string) (*State, error) {

@@ -315,6 +315,14 @@ const statusClasses: Record<UpstreamStatus, string> = {
 
 const statusLabel = (status: UpstreamStatus): string => t(`admin.upstream.status.${status}`)
 
+const statusErrorTooltip = (site: UpstreamSite): string => {
+  const errorKey = site.errorKey?.trim()
+  const reason = errorKey && te(errorKey)
+    ? t(errorKey)
+    : t('admin.upstream.errors.unknown')
+  return t('admin.upstream.status.errorTooltip', { reason })
+}
+
 const deletingSite = computed(() => upstreamSites.value.find((site) => site.id === deletingSiteId.value) ?? null)
 
 // Groups Modal Logic
@@ -506,7 +514,12 @@ const downstreamConsumptionTooltip = (site: UpstreamSite, item: DownstreamConsum
     case 'unsupported':
       return t('admin.upstream.downstreamConsumption.unsupported')
     default:
-      return downstreamConsumptionItemErrorLabel(item) ?? t('admin.upstream.downstreamConsumption.unavailable')
+      return [
+        downstreamConsumptionItemErrorLabel(item) ?? t('admin.upstream.downstreamConsumption.unavailable'),
+        item.amount !== null && item.amount !== undefined
+          ? t('admin.upstream.downstreamConsumption.persistedAmount')
+          : null,
+      ].filter(Boolean).join(' · ')
   }
 }
 
@@ -654,6 +667,19 @@ onBeforeUnmount(() => {
                   <template v-else-if="siteSyncStates.get(site.id)?.phase === 'done'">{{ t('admin.upstream.syncStream.done') }}</template>
                   <template v-else>{{ t('admin.upstream.syncStream.error') }}</template>
                 </div>
+                <Tooltip
+                  v-else-if="site.status === 'error'"
+                  :text="statusErrorTooltip(site)"
+                  wide
+                >
+                  <div
+                    class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border"
+                    :class="statusClasses[site.status]"
+                  >
+                    <XCircle class="w-3.5 h-3.5" />
+                    {{ statusLabel(site.status) }}
+                  </div>
+                </Tooltip>
                 <div
                   v-else
                   class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-xs font-medium border"
