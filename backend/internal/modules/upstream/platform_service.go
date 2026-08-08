@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -80,25 +81,36 @@ func (s *PlatformService) NormalizeURL(value string) (string, error) {
 }
 
 func (s *PlatformService) Login(baseURL string, platform Platform, account string, password string) (LoginResult, error) {
+	return s.LoginContext(context.Background(), baseURL, platform, account, password)
+}
+
+func (s *PlatformService) LoginContext(ctx context.Context, baseURL string, platform Platform, account string, password string) (LoginResult, error) {
 	normalizedURL, err := s.NormalizeURL(baseURL)
 	if err != nil {
 		return LoginResult{}, err
 	}
 	switch platform {
 	case PlatformNewAPI:
-		return s.loginNewAPI(normalizedURL, account, password)
+		return s.loginNewAPIContext(ctx, normalizedURL, account, password)
 	case PlatformSub2API:
-		return s.loginSub2API(normalizedURL, account, password)
+		return s.loginSub2APIContext(ctx, normalizedURL, account, password)
 	default:
-		result, err := s.loginNewAPI(normalizedURL, account, password)
+		result, err := s.loginNewAPIContext(ctx, normalizedURL, account, password)
 		if err == nil {
 			return result, nil
 		}
-		return s.loginSub2API(normalizedURL, account, password)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return LoginResult{}, ctxErr
+		}
+		return s.loginSub2APIContext(ctx, normalizedURL, account, password)
 	}
 }
 
 func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, account string, accessToken string, refreshToken string, tokenType string) (LoginResult, error) {
+	return s.LoginWithTokenContext(context.Background(), baseURL, platform, account, accessToken, refreshToken, tokenType)
+}
+
+func (s *PlatformService) LoginWithTokenContext(ctx context.Context, baseURL string, platform Platform, account string, accessToken string, refreshToken string, tokenType string) (LoginResult, error) {
 	if platform == PlatformNewAPI {
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -114,7 +126,7 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 	}
 	session := Session{Platform: PlatformSub2API, BaseURL: normalizedURL, AccessToken: accessToken, RefreshToken: refreshToken, TokenType: tokenType}
 	if session.RefreshToken != "" {
-		refreshedSession, err := s.refreshSub2APISession(session)
+		refreshedSession, err := s.refreshSub2APISessionContext(ctx, session)
 		if err != nil {
 			return LoginResult{}, err
 		}
@@ -123,7 +135,7 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 	if strings.TrimSpace(session.AccessToken) == "" {
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
-	metrics, err := s.fetchSub2APIMetrics(session)
+	metrics, err := s.fetchSub2APIMetricsContext(ctx, session)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -133,6 +145,10 @@ func (s *PlatformService) LoginWithToken(baseURL string, platform Platform, acco
 // LoginWithUserKey signs in to new-api with the system access token generated in
 // Personal Settings -> Security Settings. new-api also requires the matching user ID.
 func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, accessToken string) (LoginResult, error) {
+	return s.LoginWithUserKeyContext(context.Background(), baseURL, userID, accessToken)
+}
+
+func (s *PlatformService) LoginWithUserKeyContext(ctx context.Context, baseURL string, userID string, accessToken string) (LoginResult, error) {
 	normalizedURL, err := s.NormalizeURL(baseURL)
 	if err != nil {
 		return LoginResult{}, err
@@ -149,8 +165,8 @@ func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, access
 		AccessToken: accessToken,
 		TokenType:   "Bearer",
 	}
-	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
-	metrics, err := s.fetchNewAPIMetrics(session, nil)
+	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnitContext(ctx, session)
+	metrics, err := s.fetchNewAPIMetricsContext(ctx, session, nil)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -158,6 +174,10 @@ func (s *PlatformService) LoginWithUserKey(baseURL string, userID string, access
 }
 
 func (s *PlatformService) RefreshSession(session Session) (Session, error) {
+	return s.RefreshSessionContext(context.Background(), session)
+}
+
+func (s *PlatformService) RefreshSessionContext(ctx context.Context, session Session) (Session, error) {
 	if session.Platform == PlatformNewAPI {
 		return session, nil
 	}
@@ -165,11 +185,15 @@ func (s *PlatformService) RefreshSession(session Session) (Session, error) {
 	if session.RefreshToken == "" || (session.ExpiresAt != nil && *session.ExpiresAt-now > refreshSkewMS) {
 		return session, nil
 	}
-	return s.refreshSub2APISession(session)
+	return s.refreshSub2APISessionContext(ctx, session)
 }
 
 func (s *PlatformService) refreshSub2APISession(session Session) (Session, error) {
-	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/auth/refresh", requestOptions{
+	return s.refreshSub2APISessionContext(context.Background(), session)
+}
+
+func (s *PlatformService) refreshSub2APISessionContext(ctx context.Context, session Session) (Session, error) {
+	response, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/v1/auth/refresh", requestOptions{
 		Method: http.MethodPost,
 		Body: map[string]string{
 			"refresh_token": session.RefreshToken,
@@ -200,10 +224,14 @@ func (s *PlatformService) refreshSub2APISession(session Session) (Session, error
 }
 
 func (s *PlatformService) FetchMetrics(session Session) (Metrics, error) {
+	return s.FetchMetricsContext(context.Background(), session)
+}
+
+func (s *PlatformService) FetchMetricsContext(ctx context.Context, session Session) (Metrics, error) {
 	if session.Platform == PlatformNewAPI {
-		return s.fetchNewAPIMetrics(session, nil)
+		return s.fetchNewAPIMetricsContext(ctx, session, nil)
 	}
-	return s.fetchSub2APIMetrics(session)
+	return s.fetchSub2APIMetricsContext(ctx, session)
 }
 
 // LoginAdmin 平台中性的 admin 登录：按平台分发到 sub2api 或 new-api 的 admin 登录流程。
@@ -324,8 +352,12 @@ func (s *PlatformService) VerifyNewAPIAdmin(session Session) error {
 // fetchNewAPIQuotaPerUnit 调用 /api/status 获取 new-api 的 quota_per_unit 配置。
 // 失败时返回默认值 500000。
 func (s *PlatformService) fetchNewAPIQuotaPerUnit(session Session) float64 {
+	return s.fetchNewAPIQuotaPerUnitContext(context.Background(), session)
+}
+
+func (s *PlatformService) fetchNewAPIQuotaPerUnitContext(ctx context.Context, session Session) float64 {
 	const defaultQuotaPerUnit = 500000
-	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/status", newAPIAuthOptions(session))
+	response, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/status", newAPIAuthOptions(session))
 	if err != nil {
 		log.Printf("new-api /api/status fetch failed base_url=%s err=%v, using default quota_per_unit", session.BaseURL, err)
 		return defaultQuotaPerUnit
@@ -743,19 +775,26 @@ func (s *PlatformService) FetchSub2APIAdminGroups(session Session) ([]GroupInfo,
 // 默认倍率并记录日志，因为 available 已经提供了完整的基础分组列表；调用方（登录、同步）
 // 因此不会因为这一个可选接口失败而整体失败。
 func (s *PlatformService) fetchSub2APIAvailableGroupsWithRates(session Session) ([]GroupInfo, error) {
+	return s.fetchSub2APIAvailableGroupsWithRatesContext(context.Background(), session)
+}
+
+func (s *PlatformService) fetchSub2APIAvailableGroupsWithRatesContext(ctx context.Context, session Session) ([]GroupInfo, error) {
 	if session.Platform != PlatformSub2API || strings.TrimSpace(session.AccessToken) == "" {
 		return nil, newRequestError(ErrorAuth, PlatformSub2API)
 	}
 	authOptions := sub2APIUserAuthOptions(session)
 
-	response, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/groups/available", authOptions)
+	response, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/v1/groups/available", authOptions)
 	if err != nil {
 		return nil, err
 	}
 
 	rateOverrides := map[string]float64{}
-	ratesResponse, ratesErr := s.httpClient.requestJSON(session.BaseURL+"/api/v1/groups/rates", authOptions)
+	ratesResponse, ratesErr := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/v1/groups/rates", authOptions)
 	if ratesErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		log.Printf("[sub2api-groups] /api/v1/groups/rates 拉取失败，回退默认倍率 base_url=%s err=%v", session.BaseURL, ratesErr)
 	} else {
 		rateOverrides = sub2APIGroupRateOverrides(ratesResponse.Payload)
@@ -1313,7 +1352,11 @@ func (s *PlatformService) fetchNewAPIKeyUsageToday(session Session, _ []GroupInf
 }
 
 func (s *PlatformService) loginNewAPI(baseURL string, username string, password string) (LoginResult, error) {
-	response, err := s.httpClient.requestJSON(baseURL+"/api/user/login", requestOptions{
+	return s.loginNewAPIContext(context.Background(), baseURL, username, password)
+}
+
+func (s *PlatformService) loginNewAPIContext(ctx context.Context, baseURL string, username string, password string) (LoginResult, error) {
+	response, err := s.httpClient.requestJSONContext(ctx, baseURL+"/api/user/login", requestOptions{
 		Method: http.MethodPost,
 		Body:   map[string]string{"username": username, "password": password},
 	})
@@ -1334,9 +1377,12 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 	if strings.TrimSpace(session.UserID) == "" {
 		return LoginResult{}, newRequestError(ErrorAuth, PlatformNewAPI)
 	}
-	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnit(session)
-	metrics, err := s.fetchNewAPIMetrics(session, loginData)
+	session.QuotaPerUnit = s.fetchNewAPIQuotaPerUnitContext(ctx, session)
+	metrics, err := s.fetchNewAPIMetricsContext(ctx, session, loginData)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return LoginResult{}, ctxErr
+		}
 		log.Printf("new-api metrics fetch failed base_url=%s err=%v", baseURL, err)
 		metrics = defaultMetrics()
 	}
@@ -1344,7 +1390,11 @@ func (s *PlatformService) loginNewAPI(baseURL string, username string, password 
 }
 
 func (s *PlatformService) loginSub2API(baseURL string, email string, password string) (LoginResult, error) {
-	response, err := s.httpClient.requestJSON(baseURL+"/api/v1/auth/login", requestOptions{
+	return s.loginSub2APIContext(context.Background(), baseURL, email, password)
+}
+
+func (s *PlatformService) loginSub2APIContext(ctx context.Context, baseURL string, email string, password string) (LoginResult, error) {
+	response, err := s.httpClient.requestJSONContext(ctx, baseURL+"/api/v1/auth/login", requestOptions{
 		Method: http.MethodPost,
 		Body:   map[string]string{"email": email, "password": password},
 	})
@@ -1370,7 +1420,7 @@ func (s *PlatformService) loginSub2API(baseURL string, email string, password st
 		expiresAt = &next
 	}
 	session := Session{Platform: PlatformSub2API, BaseURL: baseURL, AccessToken: *accessToken, RefreshToken: refreshToken, TokenType: tokenType, ExpiresAt: expiresAt}
-	metrics, err := s.fetchSub2APIMetrics(session)
+	metrics, err := s.fetchSub2APIMetricsContext(ctx, session)
 	if err != nil {
 		return LoginResult{}, err
 	}
@@ -1378,27 +1428,43 @@ func (s *PlatformService) loginSub2API(baseURL string, email string, password st
 }
 
 func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[string]any) (Metrics, error) {
+	return s.fetchNewAPIMetricsContext(context.Background(), session, loginData)
+}
+
+func (s *PlatformService) fetchNewAPIMetricsContext(ctx context.Context, session Session, loginData map[string]any) (Metrics, error) {
 	cookieOptions := newAPIAuthOptions(session)
-	self, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self", cookieOptions)
+	self, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/user/self", cookieOptions)
 	if err != nil {
 		return Metrics{}, err
 	}
 	statURL := session.BaseURL + "/api/log/self/stat?type=2&start_timestamp=" + strconvInt(todayStart()) + "&end_timestamp=" + strconvInt(todayEnd())
-	stat, err := s.httpClient.requestJSON(statURL, cookieOptions)
+	stat, err := s.httpClient.requestJSONContext(ctx, statURL, cookieOptions)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Metrics{}, ctxErr
+		}
 		log.Printf("new-api stat request failed base_url=%s err=%v", session.BaseURL, err)
 		stat = jsonResponse{Payload: map[string]any{}}
 	}
-	groupsPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/user/self/groups", cookieOptions)
+	groupsPayload, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/user/self/groups", cookieOptions)
 	if err != nil {
-		groupsPayload, err = s.httpClient.requestJSON(session.BaseURL+"/api/user/groups", cookieOptions)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Metrics{}, ctxErr
+		}
+		groupsPayload, err = s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/user/groups", cookieOptions)
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return Metrics{}, ctxErr
+			}
 			log.Printf("new-api groups request failed base_url=%s err=%v", session.BaseURL, err)
 			groupsPayload = jsonResponse{Payload: map[string]any{}}
 		}
 	}
-	pricingPayload, err := s.httpClient.requestJSON(session.BaseURL+"/api/pricing", cookieOptions)
+	pricingPayload, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/pricing", cookieOptions)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return Metrics{}, ctxErr
+		}
 		log.Printf("new-api pricing request failed base_url=%s err=%v", session.BaseURL, err)
 		pricingPayload = jsonResponse{Payload: map[string]any{}}
 	}
@@ -1435,20 +1501,25 @@ func (s *PlatformService) fetchNewAPIMetrics(session Session, loginData map[stri
 }
 
 func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) {
+	return s.fetchSub2APIMetricsContext(context.Background(), session)
+}
+
+func (s *PlatformService) fetchSub2APIMetricsContext(ctx context.Context, session Session) (Metrics, error) {
 	authOptions := requestOptions{AccessToken: session.AccessToken, TokenType: session.TokenType}
 	log.Printf("[sub2api-metrics] 开始拉取指标 base_url=%s", session.BaseURL)
-	me, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/auth/me", authOptions)
+	me, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/v1/auth/me", authOptions)
 	if err != nil {
 		log.Printf("[sub2api-metrics] /api/v1/auth/me 失败 base_url=%s err=%v", session.BaseURL, err)
 		return Metrics{}, err
 	}
-	stats, err := s.httpClient.requestJSON(session.BaseURL+"/api/v1/usage/dashboard/stats?timezone=Asia%2FShanghai", authOptions)
+	stats, err := s.httpClient.requestJSONContext(ctx, session.BaseURL+"/api/v1/usage/dashboard/stats?timezone=Asia%2FShanghai", authOptions)
 	if err != nil {
 		log.Printf("[sub2api-metrics] /api/v1/usage/dashboard/stats 失败 base_url=%s err=%v", session.BaseURL, err)
 		return Metrics{}, err
 	}
 	today := apptimezone.Today()
-	todayStats, err := s.httpClient.requestJSON(
+	todayStats, err := s.httpClient.requestJSONContext(
+		ctx,
 		session.BaseURL+"/api/v1/usage/stats?start_date="+url.QueryEscape(today)+"&end_date="+url.QueryEscape(today)+"&timezone=Asia%2FShanghai",
 		authOptions,
 	)
@@ -1456,7 +1527,7 @@ func (s *PlatformService) fetchSub2APIMetrics(session Session) (Metrics, error) 
 		log.Printf("[sub2api-metrics] /api/v1/usage/stats 今日消费拉取失败 base_url=%s err=%v", session.BaseURL, err)
 		return Metrics{}, err
 	}
-	groups, err := s.fetchSub2APIAvailableGroupsWithRates(session)
+	groups, err := s.fetchSub2APIAvailableGroupsWithRatesContext(ctx, session)
 	if err != nil {
 		log.Printf("[sub2api-metrics] 分组列表拉取失败 base_url=%s err=%v", session.BaseURL, err)
 		return Metrics{}, err

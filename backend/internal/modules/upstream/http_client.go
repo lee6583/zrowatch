@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"log"
@@ -35,6 +36,13 @@ func NewHTTPClient(client *http.Client) *HTTPClient {
 }
 
 func (c *HTTPClient) requestJSON(reqURL string, options requestOptions) (jsonResponse, error) {
+	return c.requestJSONContext(context.Background(), reqURL, options)
+}
+
+func (c *HTTPClient) requestJSONContext(ctx context.Context, reqURL string, options requestOptions) (jsonResponse, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	method := options.Method
 	if method == "" {
 		method = http.MethodGet
@@ -45,7 +53,7 @@ func (c *HTTPClient) requestJSON(reqURL string, options requestOptions) (jsonRes
 		return jsonResponse{}, err
 	}
 
-	req, err := http.NewRequest(method, reqURL, body)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, body)
 	if err != nil {
 		return jsonResponse{}, newRequestError(ErrorInvalidURL, "")
 	}
@@ -75,16 +83,19 @@ func (c *HTTPClient) requestJSON(reqURL string, options requestOptions) (jsonRes
 
 	response, err := c.client.Do(req)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return jsonResponse{}, ctxErr
+		}
 		log.Printf("[http-client] 请求失败 url=%s err=%v", reqURL, err)
 		return jsonResponse{}, newRequestError(ErrorNetwork, "")
 	}
 	defer response.Body.Close()
 
-	payload, err := parseJSON(response.Body, reqURL)
-	if err != nil {
-		return jsonResponse{}, err
-	}
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// HTTP status is authoritative even when proxies return HTML or an empty body.
+		// Drain only a bounded prefix so the connection can usually be reused without
+		// allowing an untrusted error response to consume unbounded memory or time.
+		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
 		log.Printf("[http-client] 非 2xx 响应 url=%s status=%d", reqURL, response.StatusCode)
 		// 保留原有全局行为（仅 401 归类为 ErrorAuth），但把真实 status code 一并带出，
 		// 供需要区分 403 等细分状态的调用方判断，不改变其它调用方的既有语义。
@@ -92,6 +103,10 @@ func (c *HTTPClient) requestJSON(reqURL string, options requestOptions) (jsonRes
 			return jsonResponse{}, newRequestErrorWithStatus(ErrorAuth, "", response.StatusCode)
 		}
 		return jsonResponse{}, newRequestErrorWithStatus(ErrorRequest, "", response.StatusCode)
+	}
+	payload, err := parseJSON(response.Body, reqURL)
+	if err != nil {
+		return jsonResponse{}, err
 	}
 	// new-api commonly reports authentication/authorization failures as HTTP 200
 	// with {"success": false}. Treat that envelope as an error so Root/Admin

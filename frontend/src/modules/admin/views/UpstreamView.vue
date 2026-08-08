@@ -72,6 +72,7 @@ const platformFilter = ref(typeof storedFilters.platformFilter === 'string' ? st
 const connectedGroupTypeFilter = ref(typeof storedFilters.connectedGroupTypeFilter === 'string' ? storedFilters.connectedGroupTypeFilter : '')
 const sortMode = ref<UpstreamSortMode>(isUpstreamSortMode(storedFilters.sortMode) ? storedFilters.sortMode : 'default')
 const connectedGroupKeys = ref(new Set<string>())
+const groupConnectionsLoadFailed = ref(false)
 const downstreamConsumptionBySite = ref(new Map<string, DownstreamConsumptionItem>())
 const isLoadingDownstreamConsumption = ref(false)
 const downstreamConsumptionError = ref<string | null>(null)
@@ -258,7 +259,7 @@ const connectedGroupTypes = computed(() => {
 const hasLoadedConnectedGroupKeys = ref(false)
 
 watch(connectedGroupTypes, (types) => {
-  if (!hasLoadedConnectedGroupKeys.value) return
+  if (!hasLoadedConnectedGroupKeys.value || groupConnectionsLoadFailed.value) return
   if (connectedGroupTypeFilter.value && !types.some(type => type.toLowerCase() === connectedGroupTypeFilter.value.toLowerCase())) {
     connectedGroupTypeFilter.value = ''
   }
@@ -329,25 +330,34 @@ watch(upstreamSites, (sites) => {
 })
 
 const loadConnectedGroupKeys = async () => {
+  if (isLoadingGroupConnections.value) return
   isLoadingGroupConnections.value = true
   try {
-    const [mappingOptions, realConnections] = await Promise.all([
-      getMySiteMappingOptions().catch(() => ({ mappings: [] })),
-      listRealConnections().catch(() => []),
+    const [mappingResult, connectionsResult] = await Promise.allSettled([
+      getMySiteMappingOptions(),
+      listRealConnections(),
     ])
     const nextKeys = new Set<string>()
+    let successfulSources = 0
 
-    for (const mapping of mappingOptions.mappings ?? []) {
-      for (const target of mapping.upstreamTargets ?? []) {
-        addConnectedGroupKeys(nextKeys, target.siteId, undefined, target.groupName)
+    if (mappingResult.status === 'fulfilled') {
+      successfulSources += 1
+      for (const mapping of mappingResult.value.mappings ?? []) {
+        for (const target of mapping.upstreamTargets ?? []) {
+          addConnectedGroupKeys(nextKeys, target.siteId, undefined, target.groupName)
+        }
       }
     }
-    for (const connection of realConnections) {
-      if (connection.status && connection.status !== 'active') continue
-      addConnectedGroupKeys(nextKeys, connection.upstreamSiteId, connection.upstreamGroupId, connection.upstreamGroupName)
+    if (connectionsResult.status === 'fulfilled') {
+      successfulSources += 1
+      for (const connection of connectionsResult.value) {
+        if (connection.status && connection.status !== 'active') continue
+        addConnectedGroupKeys(nextKeys, connection.upstreamSiteId, connection.upstreamGroupId, connection.upstreamGroupName)
+      }
     }
 
-    connectedGroupKeys.value = nextKeys
+    groupConnectionsLoadFailed.value = successfulSources < 2
+    if (successfulSources > 0) connectedGroupKeys.value = nextKeys
   } finally {
     isLoadingGroupConnections.value = false
     hasLoadedConnectedGroupKeys.value = true
@@ -717,7 +727,7 @@ onBeforeUnmount(() => {
                   <Loader2 class="h-3.5 w-3.5 animate-spin" />
                   {{ t('admin.upstream.fields.checkingConnections') }}
                 </div>
-                <div v-else-if="connectedGroupsForSite(site).length > 0" class="flex flex-wrap gap-1.5">
+                <div v-else-if="connectedGroupsForSite(site).length > 0" class="flex flex-wrap items-center gap-1.5">
                   <span
                     v-for="group in connectedGroupsForSite(site)"
                     :key="`${site.id}-${group.name}`"
@@ -726,6 +736,28 @@ onBeforeUnmount(() => {
                   >
                     <span class="truncate">{{ group.name }} · {{ group.multiplierDisplay }}</span>
                   </span>
+                  <Tooltip v-if="groupConnectionsLoadFailed" :text="t('admin.upstream.fields.connectedGroupsUnavailable')">
+                    <button
+                      class="inline-flex h-7 w-7 items-center justify-center rounded-md text-warning transition-colors hover:bg-warning/10"
+                      :aria-label="t('admin.upstream.fields.retryConnections')"
+                      @click="loadConnectedGroupKeys"
+                    >
+                      <AlertCircle class="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
+                </div>
+                <div v-else-if="groupConnectionsLoadFailed" class="inline-flex items-center gap-1.5 text-xs text-warning">
+                  <AlertCircle class="h-3.5 w-3.5" />
+                  <span>{{ t('admin.upstream.fields.connectedGroupsUnavailable') }}</span>
+                  <Tooltip :text="t('admin.upstream.fields.retryConnections')">
+                    <button
+                      class="inline-flex h-7 w-7 items-center justify-center rounded-md transition-colors hover:bg-warning/10"
+                      :aria-label="t('admin.upstream.fields.retryConnections')"
+                      @click="loadConnectedGroupKeys"
+                    >
+                      <RefreshCw class="h-3.5 w-3.5" />
+                    </button>
+                  </Tooltip>
                 </div>
                 <span v-else class="text-xs text-muted-foreground">{{ t('admin.upstream.fields.noConnectedGroups') }}</span>
               </td>

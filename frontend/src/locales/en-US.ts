@@ -1414,6 +1414,8 @@ export default {
         checkingConnections: 'Checking integration status',
         connectedGroupsPreview: 'Connected groups: {groups}',
         noConnectedGroups: 'No connected groups',
+        connectedGroupsUnavailable: 'Integration status unavailable',
+        retryConnections: 'Reload integration status',
         lastUpdated: 'Last Updated',
         notSynced: 'Not synced yet'
       },

@@ -38,6 +38,7 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
       },
     })
   } catch (error) {
+    if (error instanceof Error && error.name === 'AbortError') throw error
     throw new Error('admin.upstream.errors.network')
   }
 
@@ -56,32 +57,34 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
   return payload
 }
 
-export const listUpstreamSites = async (): Promise<UpstreamSiteResponse[]> => requestJson<UpstreamSiteResponse[]>('/upstream-sites')
+export const listUpstreamSites = async (signal?: AbortSignal): Promise<UpstreamSiteResponse[]> => requestJson<UpstreamSiteResponse[]>('/upstream-sites', { signal })
 
-export const createUpstreamSite = async (form: UpstreamSiteForm): Promise<UpstreamSiteResponse> => (
+export const createUpstreamSite = async (form: UpstreamSiteForm, signal?: AbortSignal): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>('/upstream-sites', {
     method: 'POST',
     body: JSON.stringify(form),
+    signal,
   })
 )
 
-export const updateUpstreamSite = async (id: string, form: UpstreamSiteForm): Promise<UpstreamSiteResponse> => (
+export const updateUpstreamSite = async (id: string, form: UpstreamSiteForm, signal?: AbortSignal): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}`, {
     method: 'PUT',
     body: JSON.stringify(form),
+    signal,
   })
 )
 
-export const syncUpstreamSite = async (id: string): Promise<UpstreamSiteResponse> => (
-  requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}/sync`, { method: 'POST' })
+export const syncUpstreamSite = async (id: string, signal?: AbortSignal): Promise<UpstreamSiteResponse> => (
+  requestJson<UpstreamSiteResponse>(`/upstream-sites/${id}/sync`, { method: 'POST', signal })
 )
 
-export const syncAllUpstreamSites = async (): Promise<UpstreamSiteResponse[]> => (
-  requestJson<UpstreamSiteResponse[]>('/upstream-sites/sync-all', { method: 'POST' })
+export const syncAllUpstreamSites = async (signal?: AbortSignal): Promise<UpstreamSiteResponse[]> => (
+  requestJson<UpstreamSiteResponse[]>('/upstream-sites/sync-all', { method: 'POST', signal })
 )
 
-export const removeUpstreamSite = async (id: string): Promise<void> => {
-  await requestJson<{ success: boolean }>(`/upstream-sites/${id}`, { method: 'DELETE' })
+export const removeUpstreamSite = async (id: string, signal?: AbortSignal): Promise<void> => {
+  await requestJson<{ success: boolean }>(`/upstream-sites/${id}`, { method: 'DELETE', signal })
 }
 
 export const updateSiteSettings = async (id: string, settings: SiteSettings): Promise<UpstreamSiteResponse> => (

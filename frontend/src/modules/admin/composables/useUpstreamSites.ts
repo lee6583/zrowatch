@@ -23,6 +23,7 @@ const createSiteId = (): string => {
 }
 
 const siteLogo = (name: string): string => name.trim().charAt(0).toUpperCase() || 'U'
+const isAbortError = (error: unknown): boolean => error instanceof Error && error.name === 'AbortError'
 
 const emptyMetric = (): UpstreamMetricValue => ({ value: null, display: '-' })
 
@@ -43,6 +44,7 @@ const normalizeSite = (site: UpstreamSiteResponse, logoBg: string): UpstreamSite
 })
 
 export const useUpstreamSites = () => {
+  const requestController = new AbortController()
   const sites = ref<UpstreamSite[]>([])
   const isAdding = ref(false)
   const isRefreshing = ref(false)
@@ -51,18 +53,23 @@ export const useUpstreamSites = () => {
   const connectedCount = computed(() => sites.value.filter((site) => site.status === 'connected' || site.status === 'syncing').length)
 
   const loadSites = async () => {
-    const remoteSites = await listUpstreamSites()
-    sites.value = remoteSites.map((site, index) => normalizeSite(site, logoClasses[index % logoClasses.length]))
+    try {
+      const remoteSites = await listUpstreamSites(requestController.signal)
+      sites.value = remoteSites.map((site, index) => normalizeSite(site, logoClasses[index % logoClasses.length]))
+    } catch (error) {
+      if (!isAbortError(error)) throw error
+    }
   }
 
   const addSite = async (form: UpstreamSiteForm): Promise<boolean> => {
     isAdding.value = true
     addErrorKey.value = null
     try {
-      const site = await createUpstreamSite(form)
+      const site = await createUpstreamSite(form, requestController.signal)
       sites.value.unshift(normalizeSite(site, logoClasses[sites.value.length % logoClasses.length]))
       return true
     } catch (error) {
+      if (isAbortError(error)) return false
       addErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.unknown'
       return false
     } finally {
@@ -74,13 +81,14 @@ export const useUpstreamSites = () => {
     isAdding.value = true
     addErrorKey.value = null
     try {
-      const nextSite = await updateUpstreamSite(id, form)
+      const nextSite = await updateUpstreamSite(id, form, requestController.signal)
       const index = sites.value.findIndex((site) => site.id === id)
       if (index >= 0) {
         sites.value[index] = normalizeSite(nextSite, sites.value[index].logoBg)
       }
       return true
     } catch (error) {
+      if (isAbortError(error)) return false
       addErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.unknown'
       return false
     } finally {
@@ -91,7 +99,7 @@ export const useUpstreamSites = () => {
   const syncSite = async (id: string) => {
     const site = sites.value.find((item) => item.id === id)
     if (!site) return
-    const nextSite = await syncUpstreamSite(id)
+    const nextSite = await syncUpstreamSite(id, requestController.signal)
     Object.assign(site, normalizeSite(nextSite, site.logoBg))
   }
 
@@ -99,11 +107,13 @@ export const useUpstreamSites = () => {
     if (isRefreshing.value) return
     isRefreshing.value = true
     try {
-      const remoteSites = await syncAllUpstreamSites()
+      const remoteSites = await syncAllUpstreamSites(requestController.signal)
       sites.value = remoteSites.map((site, index) => {
         const current = sites.value.find((item) => item.id === site.id)
         return normalizeSite(site, current?.logoBg ?? logoClasses[index % logoClasses.length])
       })
+    } catch (error) {
+      if (!isAbortError(error)) throw error
     } finally {
       isRefreshing.value = false
     }
@@ -118,6 +128,8 @@ export const useUpstreamSites = () => {
     syncingSiteIds.value = new Set([...syncingSiteIds.value, id])
     try {
       await syncSite(id)
+    } catch (error) {
+      if (!isAbortError(error)) throw error
     } finally {
       const next = new Set(syncingSiteIds.value)
       next.delete(id)
@@ -164,7 +176,7 @@ export const useUpstreamSites = () => {
             isRefreshing.value = false
             break
         }
-      })
+      }, requestController.signal)
     } catch {
       // 连接中断时清理状态。
     } finally {
@@ -173,14 +185,14 @@ export const useUpstreamSites = () => {
   }
 
   const deleteSite = async (id: string) => {
-    await removeUpstreamSite(id)
+    await removeUpstreamSite(id, requestController.signal)
     sites.value = sites.value.filter((site) => site.id !== id)
   }
 
   void loadSites()
 
   onBeforeUnmount(() => {
-    // no-op; backend now owns refresh scheduling
+    requestController.abort()
   })
 
   return {

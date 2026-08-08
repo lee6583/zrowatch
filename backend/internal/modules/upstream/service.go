@@ -433,8 +433,15 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 	}
 
 	log.Printf("[upstream] 创建站点登录开始 name=%s url=%s platform=%s", dto.Name, dto.SiteURL, dto.Platform)
-	result, loginErr := s.createLogin(dto)
+	result, loginErr := s.createLogin(ctx, dto)
 	if loginErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+			defer cancel()
+			_ = s.cache.Delete(cleanupCtx, id, userID)
+			_ = s.deleteSite(cleanupCtx, userID, id)
+			return Response{}, ctxErr
+		}
 		log.Printf("[upstream] 创建站点登录失败 name=%s err=%v", dto.Name, loginErr)
 		site.Status = StatusError
 		key := errorKey(loginErr)
@@ -517,8 +524,15 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 		_ = s.setCachedSite(ctx, site)
 
 		log.Printf("[upstream] 更新站点登录开始 id=%s name=%s url=%s", id, dto.Name, dto.SiteURL)
-		result, loginErr := s.updateLogin(dto)
+		result, loginErr := s.updateLogin(ctx, dto)
 		if loginErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				restoreCtx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+				defer cancel()
+				s.restoreSite(restoreCtx, id, &previousSite)
+				_ = s.saveSite(restoreCtx, &previousSite)
+				return Response{}, ctxErr
+			}
 			log.Printf("[upstream] 更新站点登录失败 id=%s name=%s err=%v", id, dto.Name, loginErr)
 		} else {
 			log.Printf("[upstream] 更新站点登录成功 id=%s name=%s", id, dto.Name)
@@ -591,25 +605,25 @@ func resolvedPlatform(platform Platform) Platform {
 	return PlatformNewAPI
 }
 
-func (s *Service) createLogin(dto CreateRequest) (LoginResult, error) {
+func (s *Service) createLogin(ctx context.Context, dto CreateRequest) (LoginResult, error) {
 	switch normalizedAuthMode(dto.AuthMode) {
 	case AuthModeToken:
-		return s.platformService.LoginWithToken(dto.SiteURL, dto.Platform, dto.Account, dto.AccessToken, dto.RefreshToken, dto.TokenType)
+		return s.platformService.LoginWithTokenContext(ctx, dto.SiteURL, dto.Platform, dto.Account, dto.AccessToken, dto.RefreshToken, dto.TokenType)
 	case AuthModeUserKey:
-		return s.platformService.LoginWithUserKey(dto.SiteURL, dto.UserID, dto.AccessToken)
+		return s.platformService.LoginWithUserKeyContext(ctx, dto.SiteURL, dto.UserID, dto.AccessToken)
 	default:
-		return s.platformService.Login(dto.SiteURL, dto.Platform, dto.Account, dto.Password)
+		return s.platformService.LoginContext(ctx, dto.SiteURL, dto.Platform, dto.Account, dto.Password)
 	}
 }
 
-func (s *Service) updateLogin(dto UpdateRequest) (LoginResult, error) {
+func (s *Service) updateLogin(ctx context.Context, dto UpdateRequest) (LoginResult, error) {
 	switch normalizedAuthMode(dto.AuthMode) {
 	case AuthModeToken:
-		return s.platformService.LoginWithToken(dto.SiteURL, dto.Platform, dto.Account, dto.AccessToken, dto.RefreshToken, dto.TokenType)
+		return s.platformService.LoginWithTokenContext(ctx, dto.SiteURL, dto.Platform, dto.Account, dto.AccessToken, dto.RefreshToken, dto.TokenType)
 	case AuthModeUserKey:
-		return s.platformService.LoginWithUserKey(dto.SiteURL, dto.UserID, dto.AccessToken)
+		return s.platformService.LoginWithUserKeyContext(ctx, dto.SiteURL, dto.UserID, dto.AccessToken)
 	default:
-		return s.platformService.Login(dto.SiteURL, dto.Platform, dto.Account, dto.Password)
+		return s.platformService.LoginContext(ctx, dto.SiteURL, dto.Platform, dto.Account, dto.Password)
 	}
 }
 
@@ -784,6 +798,8 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	// 余额暂停站点仍需继续同步余额，因此保留 disabled 状态，避免页面在轮询时闪回
 	// 「同步中」或「已连接」。
 	wasBalanceSuspended := site.BalanceSuspended
+	previousStatus := site.Status
+	previousErrorKey := site.ErrorKey
 	if !wasBalanceSuspended {
 		site.Status = StatusSyncing
 	}
@@ -792,10 +808,21 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	session := *site.Session
 
 	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。
-	refreshedSession, refreshErr := s.platformService.RefreshSession(session)
+	refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
 	metrics := Metrics{}
 	if refreshErr == nil {
-		metrics, refreshErr = s.platformService.FetchMetrics(refreshedSession)
+		metrics, refreshErr = s.platformService.FetchMetricsContext(ctx, refreshedSession)
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		restoreCtx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
+		defer cancel()
+		if current, currentErr := s.cache.Get(restoreCtx, id); currentErr == nil && current != nil {
+			current.Status = previousStatus
+			current.ErrorKey = previousErrorKey
+			_ = s.setCachedSite(restoreCtx, current)
+			_ = s.saveSite(restoreCtx, current)
+		}
+		return Response{}, ctxErr
 	}
 
 	// 重新读取站点确认仍存在（可能在同步期间被删除）。

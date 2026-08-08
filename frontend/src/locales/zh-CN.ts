@@ -1414,6 +1414,8 @@ export default {
         checkingConnections: '正在检查对接状态',
         connectedGroupsPreview: '已对接分组：{groups}',
         noConnectedGroups: '暂无已对接分组',
+        connectedGroupsUnavailable: '对接状态加载失败',
+        retryConnections: '重新加载对接状态',
         lastUpdated: '更新时间',
         notSynced: '暂未同步'
       },
