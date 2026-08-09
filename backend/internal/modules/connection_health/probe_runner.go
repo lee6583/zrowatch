@@ -1,6 +1,7 @@
 package connection_health
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -15,8 +16,8 @@ import (
 // ProbeTimeout 是普通网关探活的默认超时时间。Claude 模型首包通常更慢，使用独立阈值
 // 避免把仍在正常生成的请求误判为网络故障。
 const (
-	ProbeTimeout          = 10 * time.Second
-	AnthropicProbeTimeout = 30 * time.Second
+	ProbeTimeout          = 12 * time.Second
+	AnthropicProbeTimeout = 20 * time.Second
 )
 
 const defaultProbePrompt = "hi"
@@ -69,6 +70,17 @@ func (r *RealProbeRunner) Probe(ctx context.Context, req ProbeRequest) ProbeOutc
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
+	}
+	if strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/event-stream") {
+		outcome := classifyStreamingResponse(resp.Body, req.UpstreamKey, started)
+		if outcome.Result == ResultOK {
+			cancel()
+		}
+		return outcome
+	}
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	return classifyHTTPResponse(resp.StatusCode, body, req.UpstreamKey, latencyMs)
 }
@@ -102,10 +114,71 @@ func buildProbeRequest(ctx context.Context, req ProbeRequest, prompt string, max
 	payload := map[string]any{
 		"model":      model,
 		"max_tokens": maxTokens,
+		"stream":     true,
 		"messages":   []map[string]any{{"role": "user", "content": prompt}},
 	}
 	headers := map[string]string{"Authorization": "Bearer " + req.UpstreamKey}
 	return newJSONRequest(ctx, http.MethodPost, endpoint, payload, headers)
+}
+
+// classifyStreamingResponse accepts the first usable SSE data frame. A probe
+// only needs to prove that the gateway accepted the model and started a
+// response; waiting for [DONE] would make a tiny health check as slow as a
+// normal completion.
+func classifyStreamingResponse(body io.Reader, upstreamKey string, started time.Time) ProbeOutcome {
+	reader := bufio.NewReaderSize(body, 16*1024)
+	var pending strings.Builder
+	for {
+		line, err := reader.ReadString('\n')
+		pending.WriteString(line)
+		if strings.HasSuffix(line, "\n") || err != nil {
+			for _, raw := range strings.Split(pending.String(), "\n") {
+				data := strings.TrimSpace(raw)
+				if !strings.HasPrefix(data, "data:") {
+					continue
+				}
+				data = strings.TrimSpace(strings.TrimPrefix(data, "data:"))
+				if data == "" || data == "[DONE]" {
+					continue
+				}
+				if streamChunkIsValid(data) {
+					return ProbeOutcome{Result: ResultOK, LatencyMs: int(time.Since(started).Milliseconds())}
+				}
+			}
+			pending.Reset()
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return ProbeOutcome{Result: ResultInvalidResponse, LatencyMs: int(time.Since(started).Milliseconds()), Detail: "stream ended before a valid response fragment"}
+			}
+			return ProbeOutcome{Result: ResultNetworkFluctuation, LatencyMs: int(time.Since(started).Milliseconds()), Detail: redact(err.Error(), upstreamKey)}
+		}
+	}
+}
+
+func streamChunkIsValid(value string) bool {
+	var payload map[string]any
+	if json.Unmarshal([]byte(value), &payload) != nil {
+		return false
+	}
+	choices, ok := payload["choices"].([]any)
+	if !ok || len(choices) == 0 {
+		return false
+	}
+	choice, ok := choices[0].(map[string]any)
+	if !ok {
+		return false
+	}
+	if _, ok := choice["delta"].(map[string]any); ok {
+		return true
+	}
+	if _, ok := choice["text"].(string); ok {
+		return true
+	}
+	if _, ok := choice["message"].(map[string]any); ok {
+		return true
+	}
+	return false
 }
 
 func normalizeProbeBaseURL(value string) string {

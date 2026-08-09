@@ -21,6 +21,9 @@ const (
 	groupRateMonitorMaxInterval     = 86400
 	groupRateMonitorMaxFailures     = 10
 	groupRateMonitorHistorySize     = 5
+	groupRateProbeTotalTimeout      = 30 * time.Second
+	groupRateProbeAccountTimeout    = 10 * time.Second
+	groupRateProbeConcurrency       = 6
 
 	groupRateProbeHealthy      = "healthy"
 	groupRateProbeWarning      = "warning"
@@ -225,6 +228,13 @@ type groupRateMonitorGroup struct {
 	GroupType string
 	GroupKey  string
 	Accounts  []my_sites.RealConnection
+}
+
+type groupRateProbeJob struct {
+	done     chan struct{}
+	cycle    GroupRateProbeCycle
+	dispatch []BoundDispatchAccountState
+	err      error
 }
 
 type resolvedGroupRateMonitorConfig struct {
@@ -768,6 +778,36 @@ func (s *Service) ProbeGroupRateMonitor(ctx context.Context, userID string, inpu
 }
 
 func (s *Service) runGroupRateProbeCycle(ctx context.Context, settings GroupRateMonitorSettings, session upstream.Session, group groupRateMonitorGroup, model, trigger string) (GroupRateProbeCycle, []BoundDispatchAccountState, error) {
+	jobKey := settings.UserID + ":" + settings.AdminAccountID + ":" + groupRateMonitorMapKey(group.SiteID, group.GroupKey)
+	s.groupProbeMu.Lock()
+	if s.groupProbeJobs == nil {
+		s.groupProbeJobs = make(map[string]*groupRateProbeJob)
+	}
+	if existing := s.groupProbeJobs[jobKey]; existing != nil {
+		s.groupProbeMu.Unlock()
+		select {
+		case <-existing.done:
+			return existing.cycle, existing.dispatch, existing.err
+		case <-ctx.Done():
+			return GroupRateProbeCycle{}, nil, ctx.Err()
+		}
+	}
+	job := &groupRateProbeJob{done: make(chan struct{})}
+	s.groupProbeJobs[jobKey] = job
+	s.groupProbeMu.Unlock()
+
+	probeCtx, cancel := context.WithTimeout(ctx, groupRateProbeTotalTimeout)
+	cycle, dispatch, err := s.runGroupRateProbeCycleOnce(probeCtx, settings, session, group, model, trigger)
+	cancel()
+	s.groupProbeMu.Lock()
+	job.cycle, job.dispatch, job.err = cycle, dispatch, err
+	close(job.done)
+	delete(s.groupProbeJobs, jobKey)
+	s.groupProbeMu.Unlock()
+	return cycle, dispatch, err
+}
+
+func (s *Service) runGroupRateProbeCycleOnce(ctx context.Context, settings GroupRateMonitorSettings, session upstream.Session, group groupRateMonitorGroup, model, trigger string) (GroupRateProbeCycle, []BoundDispatchAccountState, error) {
 	repo, err := groupRateMonitorRepo(s.repo)
 	if err != nil {
 		return GroupRateProbeCycle{}, nil, err
@@ -921,7 +961,7 @@ func groupRateProbeStatus(detail GroupRateProbeTargetResult, failureThreshold in
 }
 
 func (s *Service) reconcileGroupRateMonitorAccounts(ctx context.Context, repo groupRateMonitorRepository, settings GroupRateMonitorSettings, session upstream.Session, group groupRateMonitorGroup, probe GroupRateProbeTargetResult, actionMode string) []BoundDispatchAccountState {
-	result := make([]BoundDispatchAccountState, 0, len(group.Accounts))
+	connections := make([]my_sites.RealConnection, 0, len(group.Accounts))
 	seen := make(map[string]struct{}, len(group.Accounts))
 	for _, connection := range group.Accounts {
 		accountID := strings.TrimSpace(connection.AdminAccountID)
@@ -932,50 +972,104 @@ func (s *Service) reconcileGroupRateMonitorAccounts(ctx context.Context, repo gr
 			continue
 		}
 		seen[accountID] = struct{}{}
-		targetID := buildTargetID(string(upstream.PlatformSub2API), settings.AdminAccountID, accountID)
-		item := BoundDispatchAccountState{ID: accountID, Name: connection.AdminAccountName, TargetID: targetID}
-		if s.dispatchStates == nil || s.schedulingActions == nil {
-			item.UnavailableReason = "unavailable"
-			result = append(result, item)
-			continue
-		}
-		release, err := s.repo.AcquireTargetLease(ctx, targetID)
-		if err != nil {
-			item.UnavailableReason = "target_busy"
-			result = append(result, item)
-			continue
-		}
-		remote, remoteErr := s.dispatchStates.GetSub2APIAdminAccountState(session, accountID)
-		if remoteErr != nil || remote.Schedulable == nil || strings.TrimSpace(remote.Status) == "" {
-			item.UnavailableReason = "not_found"
-			release()
-			result = append(result, item)
-			continue
-		}
-		item.Name = firstNonEmpty(remote.Name, connection.AdminAccountName)
-		item.Status = remote.Status
-		item.Schedulable = remote.Schedulable
-		if probe.Available && actionMode != "" {
-			detail := probe
-			detail.TargetID = targetID
-			detail.AccountID = accountID
-			detail.AccountName = item.Name
-			detail.Status = remote.Status
-			detail.Schedulable = remote.Schedulable
-			if actionMode == "manual" {
-				item.ActionResult, item.Status, item.Schedulable = s.forceGroupRateMonitorAccount(ctx, repo, settings, session, detail, remote)
-			} else {
-				item.ActionResult, item.Status, item.Schedulable = s.reconcileGroupRateMonitorAccount(ctx, repo, settings, session, group, detail, remote, true)
-			}
-			if item.ActionResult != "" {
-				log.Printf("[group-rate-monitor] account reconcile workspace=%s site=%s group=%s account=%s result=%s", settings.AdminAccountID, group.SiteID, group.GroupName, accountID, item.ActionResult)
-			}
-		}
-		item.Available = true
-		release()
-		result = append(result, item)
+		connections = append(connections, connection)
 	}
+	result := make([]BoundDispatchAccountState, len(connections))
+	var wait sync.WaitGroup
+	limit := make(chan struct{}, groupRateProbeConcurrency)
+	for index := range connections {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			limit <- struct{}{}
+			defer func() { <-limit }()
+			connection := connections[index]
+			accountID := strings.TrimSpace(connection.AdminAccountID)
+			targetID := buildTargetID(string(upstream.PlatformSub2API), settings.AdminAccountID, accountID)
+			item := BoundDispatchAccountState{ID: accountID, Name: connection.AdminAccountName, TargetID: targetID}
+			result[index] = item
+			if s.dispatchStates == nil || s.schedulingActions == nil {
+				item.UnavailableReason = "unavailable"
+				result[index] = item
+				return
+			}
+			accountCtx, cancel := context.WithTimeout(ctx, groupRateProbeAccountTimeout)
+			defer cancel()
+			release, err := s.repo.AcquireTargetLease(accountCtx, targetID)
+			if err != nil {
+				item.UnavailableReason = "target_busy"
+				result[index] = item
+				return
+			}
+			defer release()
+			remote, remoteErr := s.getSub2APIAdminAccountState(accountCtx, session, accountID)
+			if remoteErr != nil || remote.Schedulable == nil || strings.TrimSpace(remote.Status) == "" {
+				item.UnavailableReason = "remote_request_failed"
+				// Keep the historical not_found classification for simple test/fake
+				// readers, while real HTTP errors and context deadlines stay explicit.
+				if isRemoteAccountNotFound(remoteErr) || (remoteErr != nil && !isRemoteAccountRequestError(remoteErr) && accountCtx.Err() == nil) {
+					item.UnavailableReason = "not_found"
+				}
+				result[index] = item
+				return
+			}
+			item.Name = firstNonEmpty(remote.Name, connection.AdminAccountName)
+			item.Status = remote.Status
+			item.Schedulable = remote.Schedulable
+			if probe.Available && actionMode != "" {
+				detail := probe
+				detail.TargetID = targetID
+				detail.AccountID = accountID
+				detail.AccountName = item.Name
+				detail.Status = remote.Status
+				detail.Schedulable = remote.Schedulable
+				// The remote GETs above remain concurrent. Serialize the repository
+				// action transaction so lightweight in-memory repositories used by
+				// tests and embedded deployments cannot observe partial state writes.
+				s.groupAccountActionMu.Lock()
+				if actionMode == "manual" {
+					item.ActionResult, item.Status, item.Schedulable = s.forceGroupRateMonitorAccount(accountCtx, repo, settings, session, detail, remote)
+				} else {
+					item.ActionResult, item.Status, item.Schedulable = s.reconcileGroupRateMonitorAccount(accountCtx, repo, settings, session, group, detail, remote, true)
+				}
+				s.groupAccountActionMu.Unlock()
+				if strings.Contains(item.ActionResult, "failed") {
+					item.UnavailableReason = "remote_action_failed"
+				}
+				if item.ActionResult != "" {
+					log.Printf("[group-rate-monitor] account reconcile workspace=%s site=%s group=%s account=%s result=%s", settings.AdminAccountID, group.SiteID, group.GroupName, accountID, item.ActionResult)
+				}
+			}
+			item.Available = true
+			result[index] = item
+		}(index)
+	}
+	wait.Wait()
 	return result
+}
+
+func (s *Service) getSub2APIAdminAccountState(ctx context.Context, session upstream.Session, accountID string) (upstream.Sub2APIAdminAccountState, error) {
+	if reader, ok := s.dispatchStates.(accountDispatchStateReaderWithContext); ok {
+		return reader.GetSub2APIAdminAccountStateContext(ctx, session, accountID)
+	}
+	return s.dispatchStates.GetSub2APIAdminAccountState(session, accountID)
+}
+
+func (s *Service) updateSub2APIAdminAccountState(ctx context.Context, session upstream.Session, accountID string, status *string, schedulable *bool) error {
+	if actioner, ok := s.schedulingActions.(accountSchedulingActionerWithContext); ok {
+		return actioner.UpdateSub2APIAdminAccountStateContext(ctx, session, accountID, status, schedulable)
+	}
+	return s.schedulingActions.UpdateSub2APIAdminAccountState(session, accountID, status, schedulable)
+}
+
+func isRemoteAccountNotFound(err error) bool {
+	var requestErr *upstream.RequestError
+	return errors.As(err, &requestErr) && requestErr.StatusCode == 404
+}
+
+func isRemoteAccountRequestError(err error) bool {
+	var requestErr *upstream.RequestError
+	return errors.As(err, &requestErr)
 }
 
 func (s *Service) forceGroupRateMonitorAccount(ctx context.Context, repo groupRateMonitorRepository, settings GroupRateMonitorSettings, session upstream.Session, detail GroupRateProbeTargetResult, remote upstream.Sub2APIAdminAccountState) (string, string, *bool) {
@@ -1015,7 +1109,7 @@ func (s *Service) forceGroupRateMonitorAccount(ctx context.Context, repo groupRa
 	if currentStatus == desiredStatus && *remote.Schedulable == desiredSchedulable {
 		return result, desiredStatus, boolPointer(desiredSchedulable)
 	}
-	if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
+	if err := s.updateSub2APIAdminAccountState(ctx, session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
 		if detail.Healthy {
 			return "restore_failed", remote.Status, remote.Schedulable
 		}
@@ -1054,7 +1148,7 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 			}
 			desiredStatus := "active"
 			desiredSchedulable := true
-			if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
+			if err := s.updateSub2APIAdminAccountState(ctx, session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
 				return "restore_failed", remote.Status, remote.Schedulable
 			}
 			return "restored", desiredStatus, boolPointer(true)
@@ -1086,7 +1180,7 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 		if err := repo.UpsertGroupRateMonitorAction(ctx, *action); err != nil {
 			return "restore_state_failed", remote.Status, remote.Schedulable
 		}
-		if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
+		if err := s.updateSub2APIAdminAccountState(ctx, session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
 			return "restore_failed", remote.Status, remote.Schedulable
 		}
 		_ = repo.DeleteGroupRateMonitorAction(ctx, settings.UserID, settings.AdminAccountID, detail.TargetID)
@@ -1104,7 +1198,7 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 			return "managed_elsewhere", remote.Status, remote.Schedulable
 		}
 		if !targetStatusEnabled(string(upstream.PlatformSub2API), currentStatus) || !*currentSchedulable {
-			return s.normalizeDisabledGroupRateMonitorAccount(session, detail.AccountID, currentStatus, *currentSchedulable)
+			return s.normalizeDisabledGroupRateMonitorAccount(ctx, session, detail.AccountID, currentStatus, *currentSchedulable)
 		}
 		action = &GroupRateMonitorActionState{UserID: settings.UserID, AdminAccountID: settings.AdminAccountID,
 			TargetID: detail.TargetID, AccountID: detail.AccountID, AccountName: detail.AccountName,
@@ -1165,7 +1259,7 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 	if err := repo.UpsertGroupRateMonitorAction(ctx, *action); err != nil {
 		return "disable_state_failed", remote.Status, remote.Schedulable
 	}
-	if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
+	if err := s.updateSub2APIAdminAccountState(ctx, session, detail.AccountID, &desiredStatus, &desiredSchedulable); err != nil {
 		return "disable_failed", remote.Status, remote.Schedulable
 	}
 	action.LastAppliedStatus = desiredStatus
@@ -1177,13 +1271,13 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 	return "disabled", desiredStatus, boolPointer(false)
 }
 
-func (s *Service) normalizeDisabledGroupRateMonitorAccount(session upstream.Session, accountID, currentStatus string, currentSchedulable bool) (string, string, *bool) {
+func (s *Service) normalizeDisabledGroupRateMonitorAccount(ctx context.Context, session upstream.Session, accountID, currentStatus string, currentSchedulable bool) (string, string, *bool) {
 	desiredStatus := "inactive"
 	desiredSchedulable := false
 	if currentStatus == desiredStatus && !currentSchedulable {
 		return RemoteActionSkippedTargetInitiallyDisabled, desiredStatus, boolPointer(false)
 	}
-	if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, accountID, &desiredStatus, &desiredSchedulable); err != nil {
+	if err := s.updateSub2APIAdminAccountState(ctx, session, accountID, &desiredStatus, &desiredSchedulable); err != nil {
 		return "disable_failed", currentStatus, boolPointer(currentSchedulable)
 	}
 	return "disabled", desiredStatus, boolPointer(false)
@@ -1271,7 +1365,7 @@ func (s *Service) restoreGroupRateMonitorAction(ctx context.Context, repo groupR
 		return "restore_failed"
 	}
 	defer release()
-	remote, err := s.dispatchStates.GetSub2APIAdminAccountState(session, action.AccountID)
+	remote, err := s.getSub2APIAdminAccountState(ctx, session, action.AccountID)
 	if err != nil || remote.Schedulable == nil {
 		action.PendingRestore = true
 		_ = repo.UpsertGroupRateMonitorAction(ctx, action)
@@ -1290,7 +1384,7 @@ func (s *Service) restoreGroupRateMonitorAction(ctx context.Context, repo groupR
 	if err := repo.UpsertGroupRateMonitorAction(ctx, action); err != nil {
 		return "restore_failed"
 	}
-	if err := s.schedulingActions.UpdateSub2APIAdminAccountState(session, action.AccountID, &action.OriginalStatus, &action.OriginalSchedulable); err != nil {
+	if err := s.updateSub2APIAdminAccountState(ctx, session, action.AccountID, &action.OriginalStatus, &action.OriginalSchedulable); err != nil {
 		return "restore_failed"
 	}
 	_ = repo.DeleteGroupRateMonitorAction(ctx, action.UserID, action.AdminAccountID, action.TargetID)

@@ -57,22 +57,25 @@ type healthRepository interface {
 // Service 组装 connection_health 模块的全部业务逻辑：聚合查询、策略管理、手动动作、
 // 真实探活执行。所有对外可见字段都不含 upstream_key，符合任务书的敏感信息约束。
 type Service struct {
-	repo               healthRepository
-	mySites            MySitesReader
-	sites              SiteLookup
-	accounts           AdminAccountResolver
-	dispatcher         RemoteActionRunner
-	probeRunner        *RealProbeRunner
-	modelDiscovery     *ModelDiscoveryRunner
-	platformGroups     PlatformGroupReader
-	priorityActions    TargetPriorityActioner
-	profitActions      ProfitPriorityActioner
-	schedulingActions  AccountSchedulingActioner
-	dispatchActions    AccountDispatchActioner
-	dispatchStates     AccountDispatchStateReader
-	balancePauses      BalancePauseLookup
-	profitPriorityMu   sync.Mutex
-	profitRuntimeCache map[string]profitRuntimeCacheEntry
+	repo                 healthRepository
+	mySites              MySitesReader
+	sites                SiteLookup
+	accounts             AdminAccountResolver
+	dispatcher           RemoteActionRunner
+	probeRunner          *RealProbeRunner
+	modelDiscovery       *ModelDiscoveryRunner
+	platformGroups       PlatformGroupReader
+	priorityActions      TargetPriorityActioner
+	profitActions        ProfitPriorityActioner
+	schedulingActions    AccountSchedulingActioner
+	dispatchActions      AccountDispatchActioner
+	dispatchStates       AccountDispatchStateReader
+	balancePauses        BalancePauseLookup
+	profitPriorityMu     sync.Mutex
+	profitRuntimeCache   map[string]profitRuntimeCacheEntry
+	groupProbeMu         sync.Mutex
+	groupProbeJobs       map[string]*groupRateProbeJob
+	groupAccountActionMu sync.Mutex
 }
 
 func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platform PlatformActioner) *Service {
@@ -84,6 +87,7 @@ func NewService(repo *Repository, mySites MySitesReader, sites SiteLookup, platf
 		probeRunner:        NewRealProbeRunner(),
 		modelDiscovery:     NewModelDiscoveryRunner(),
 		profitRuntimeCache: make(map[string]profitRuntimeCacheEntry),
+		groupProbeJobs:     make(map[string]*groupRateProbeJob),
 	}
 	// 真实 PlatformService 同时实现优先级更新能力；测试或旧注入器如果尚未实现，倍率策略会
 	// 安全跳过远端写入，不影响既有探活/降级流程。
@@ -111,6 +115,10 @@ type AccountSchedulingActioner interface {
 	UpdateSub2APIAdminAccountState(session upstream.Session, accountID string, status *string, schedulable *bool) error
 }
 
+type accountSchedulingActionerWithContext interface {
+	UpdateSub2APIAdminAccountStateContext(ctx context.Context, session upstream.Session, accountID string, status *string, schedulable *bool) error
+}
+
 // AccountDispatchActioner is the fast path for the group-rates dispatch switch.
 // It validates the account by ID and performs the GET+PUT merge without
 // enumerating all upstream groups and account lists first.
@@ -122,6 +130,10 @@ type AccountDispatchActioner interface {
 // This avoids the expensive admin-group inventory scan for the group-rates page.
 type AccountDispatchStateReader interface {
 	GetSub2APIAdminAccountState(session upstream.Session, accountID string) (upstream.Sub2APIAdminAccountState, error)
+}
+
+type accountDispatchStateReaderWithContext interface {
+	GetSub2APIAdminAccountStateContext(ctx context.Context, session upstream.Session, accountID string) (upstream.Sub2APIAdminAccountState, error)
 }
 
 // BoundDispatchAccountState is the small, non-sensitive state needed by the

@@ -24,6 +24,7 @@ func TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint(t *testing.
 			var gotPath string
 			var gotAuth string
 			var gotMaxTokens float64
+			var gotStream bool
 
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gotPath = r.URL.Path
@@ -31,6 +32,7 @@ func TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint(t *testing.
 				var body map[string]any
 				_ = json.NewDecoder(r.Body).Decode(&body)
 				gotMaxTokens, _ = body["max_tokens"].(float64)
+				gotStream, _ = body["stream"].(bool)
 				w.WriteHeader(http.StatusOK)
 				_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 			}))
@@ -51,6 +53,9 @@ func TestProbe_AllProviderFamiliesUseOpenAICompatibleGatewayEndpoint(t *testing.
 			}
 			if gotMaxTokens != 1 {
 				t.Fatalf("expected max_probe_tokens=1 to propagate, got %v", gotMaxTokens)
+			}
+			if !gotStream {
+				t.Fatal("expected stream=true for health probe")
 			}
 		})
 	}
@@ -73,6 +78,29 @@ func TestProbe_BaseURLWithVersionSuffixDoesNotDuplicateV1(t *testing.T) {
 	}
 	if gotPath != "/v1/chat/completions" {
 		t.Fatalf("expected one version segment, got %s", gotPath)
+	}
+}
+
+func TestProbe_StreamReturnsAfterFirstValidChunk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+		_, _ = w.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"o\"}}]}\n\n"))
+		flusher.Flush()
+		time.Sleep(2 * time.Second)
+	}))
+	defer server.Close()
+
+	started := time.Now()
+	outcome := NewRealProbeRunner().Probe(context.Background(), ProbeRequest{BaseURL: server.URL, UpstreamKey: "k", ModelName: "gpt-test"})
+	if outcome.Result != ResultOK {
+		t.Fatalf("expected first stream chunk to be successful, got %s (%s)", outcome.Result, outcome.Detail)
+	}
+	if elapsed := time.Since(started); elapsed >= time.Second {
+		t.Fatalf("stream probe waited for the full response: %s", elapsed)
 	}
 }
 
@@ -105,12 +133,12 @@ func TestProbe_DefaultModelPerProviderWhenModelNameEmpty(t *testing.T) {
 }
 
 func TestProbeTimeoutForProvider(t *testing.T) {
-	if got := probeTimeoutForProvider(ProviderAnthropic); got != 30*time.Second {
-		t.Fatalf("expected anthropic probe timeout 30s, got %s", got)
+	if got := probeTimeoutForProvider(ProviderAnthropic); got != 20*time.Second {
+		t.Fatalf("expected anthropic probe timeout 20s, got %s", got)
 	}
 	for _, family := range []string{ProviderOpenAI, ProviderGemini, ProviderCustom, ""} {
-		if got := probeTimeoutForProvider(family); got != 10*time.Second {
-			t.Fatalf("provider=%q: expected default probe timeout 10s, got %s", family, got)
+		if got := probeTimeoutForProvider(family); got != 12*time.Second {
+			t.Fatalf("provider=%q: expected default probe timeout 12s, got %s", family, got)
 		}
 	}
 }

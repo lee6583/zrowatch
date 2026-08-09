@@ -1636,7 +1636,8 @@ export default {
           loadFailed: 'Failed to load health status. Please try again.',
           settingsLoadFailed: 'Failed to load probe settings. Please try again.',
           settingsSaveFailed: 'Failed to save probe settings. Please try again.',
-          probeFailed: 'Manual probe failed. Please try again.'
+          probeFailed: 'Manual probe failed. Please try again.',
+          probeTimeout: 'Probe timed out. Check the upstream response or try again later.'
         }
       },
       actions: {

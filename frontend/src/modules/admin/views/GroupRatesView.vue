@@ -747,25 +747,34 @@ const probeHealthRate = async (rate: GroupRate) => {
   if (probingHealthGroups.value.has(key)) return
   healthSummaryErrorKey.value = ''
   probingHealthGroups.value = new Set(probingHealthGroups.value).add(key)
+  const controller = new AbortController()
+  let timedOut = false
+  const timeout = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, 35_000)
   try {
     const response = await probeGroupRateMonitor({
       upstreamSiteId: rate.siteId,
       upstreamGroupId: rate.groupId ?? '',
       upstreamGroupName: rate.groupName,
-    })
+    }, controller.signal)
     const summaries = new Map(groupRateHealthSummaries.value)
     summaries.set(key, response.summary)
     groupRateHealthSummaries.value = summaries
     for (const account of response.dispatchAccounts) mergeDispatchAccount(account)
     flashHealthStatus(rate)
   } catch (error) {
-    if (isBalanceSuspendedError(error)) {
+    if (timedOut) {
+      healthSummaryErrorKey.value = 'admin.groupRates.health.errors.probeTimeout'
+    } else if (isBalanceSuspendedError(error)) {
       await loadDispatchAccounts()
       flashHealthStatus(rate)
     } else {
       healthSummaryErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.probeFailed'
     }
   } finally {
+    window.clearTimeout(timeout)
     const probing = new Set(probingHealthGroups.value)
     probing.delete(key)
     probingHealthGroups.value = probing

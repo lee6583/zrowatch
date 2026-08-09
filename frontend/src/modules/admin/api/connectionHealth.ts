@@ -131,10 +131,11 @@ export const updateGroupRateMonitorProfitPriority = async (enabled: boolean): Pr
 export const getGroupRateMonitorSummaries = async (): Promise<GroupRateMonitorSummary[]> =>
   requestJson<GroupRateMonitorSummary[]>('/connection-health/group-rate-monitor/summaries')
 
-export const probeGroupRateMonitor = async (input: GroupRateManualProbeInput): Promise<GroupRateManualProbeResponse> =>
+export const probeGroupRateMonitor = async (input: GroupRateManualProbeInput, signal?: AbortSignal): Promise<GroupRateManualProbeResponse> =>
   requestJson<GroupRateManualProbeResponse>('/connection-health/group-rate-monitor/probe', {
     method: 'POST',
     body: JSON.stringify(input),
+    signal,
   })
 
 export const getConnectionHealthEvents = async (connectionId?: string, limit = 100): Promise<ConnectionHealthEvent[]> => {

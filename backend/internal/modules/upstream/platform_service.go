@@ -2617,6 +2617,12 @@ type Sub2APIAdminAccountState struct {
 // GetSub2APIAdminAccountState reads one forwarding account without exposing its
 // credentials to callers.
 func (s *PlatformService) GetSub2APIAdminAccountState(session Session, accountID string) (Sub2APIAdminAccountState, error) {
+	return s.GetSub2APIAdminAccountStateContext(context.Background(), session, accountID)
+}
+
+// GetSub2APIAdminAccountStateContext is the cancellable form used by bounded
+// health probes. The legacy method remains available for existing callers.
+func (s *PlatformService) GetSub2APIAdminAccountStateContext(ctx context.Context, session Session, accountID string) (Sub2APIAdminAccountState, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return Sub2APIAdminAccountState{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -2624,7 +2630,7 @@ func (s *PlatformService) GetSub2APIAdminAccountState(session Session, accountID
 		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
-	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
+	response, err := s.httpClient.requestJSONContext(ctx, accountURL, adminAuthOptions(session))
 	if err != nil {
 		return Sub2APIAdminAccountState{}, err
 	}
@@ -2658,15 +2664,22 @@ func sub2APIAdminAccountStateFromPayload(accountID string, payload any) (Sub2API
 // status through the account PUT endpoint, but schedulable has its own POST
 // endpoint and must not be treated as a regular account field.
 func (s *PlatformService) UpdateSub2APIAdminAccountState(session Session, accountID string, status *string, schedulable *bool) error {
+	return s.UpdateSub2APIAdminAccountStateContext(context.Background(), session, accountID, status, schedulable)
+}
+
+// UpdateSub2APIAdminAccountStateContext updates an account with a cancellable
+// GET/PUT plus schedulable request sequence. This prevents one slow remote
+// account from holding the whole group probe open.
+func (s *PlatformService) UpdateSub2APIAdminAccountStateContext(ctx context.Context, session Session, accountID string, status *string, schedulable *bool) error {
 	if status == nil && schedulable == nil {
 		return newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	if status != nil {
-		if _, err := s.updateSub2APIAdminAccountState(session, accountID, status, nil, schedulable != nil); err != nil {
+		if _, err := s.updateSub2APIAdminAccountStateContext(ctx, session, accountID, status, nil, schedulable != nil); err != nil {
 			return err
 		}
 	} else {
-		state, err := s.GetSub2APIAdminAccountState(session, accountID)
+		state, err := s.GetSub2APIAdminAccountStateContext(ctx, session, accountID)
 		if err != nil {
 			return err
 		}
@@ -2678,10 +2691,10 @@ func (s *PlatformService) UpdateSub2APIAdminAccountState(session Session, accoun
 		return nil
 	}
 
-	if err := s.setSub2APIAdminAccountSchedulable(session, accountID, *schedulable); err != nil {
+	if err := s.setSub2APIAdminAccountSchedulableContext(ctx, session, accountID, *schedulable); err != nil {
 		return err
 	}
-	verified, err := s.GetSub2APIAdminAccountState(session, accountID)
+	verified, err := s.GetSub2APIAdminAccountStateContext(ctx, session, accountID)
 	if err != nil {
 		return err
 	}
@@ -2762,6 +2775,10 @@ func (s *PlatformService) UpdateSub2APIAdminAccountDispatch(session Session, acc
 }
 
 func (s *PlatformService) setSub2APIAdminAccountSchedulable(session Session, accountID string, enabled bool) error {
+	return s.setSub2APIAdminAccountSchedulableContext(context.Background(), session, accountID, enabled)
+}
+
+func (s *PlatformService) setSub2APIAdminAccountSchedulableContext(ctx context.Context, session Session, accountID string, enabled bool) error {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() || strings.TrimSpace(accountID) == "" {
 		return newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -2769,7 +2786,7 @@ func (s *PlatformService) setSub2APIAdminAccountSchedulable(session Session, acc
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPost
 	options.Body = map[string]any{"schedulable": enabled}
-	_, err := s.httpClient.requestJSON(schedulableURL, options)
+	_, err := s.httpClient.requestJSONContext(ctx, schedulableURL, options)
 	return err
 }
 
@@ -2778,6 +2795,10 @@ func normalizeSub2APIAccountStatus(status string) string {
 }
 
 func (s *PlatformService) updateSub2APIAdminAccountState(session Session, accountID string, status *string, schedulable *bool, requireSchedulable bool) (Sub2APIAdminAccountState, error) {
+	return s.updateSub2APIAdminAccountStateContext(context.Background(), session, accountID, status, schedulable, requireSchedulable)
+}
+
+func (s *PlatformService) updateSub2APIAdminAccountStateContext(ctx context.Context, session Session, accountID string, status *string, schedulable *bool, requireSchedulable bool) (Sub2APIAdminAccountState, error) {
 	if session.Platform != PlatformSub2API || !session.IsAuthenticated() {
 		return Sub2APIAdminAccountState{}, newRequestError(ErrorAuth, PlatformSub2API)
 	}
@@ -2785,7 +2806,7 @@ func (s *PlatformService) updateSub2APIAdminAccountState(session Session, accoun
 		return Sub2APIAdminAccountState{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
 	}
 	accountURL := session.BaseURL + "/api/v1/admin/accounts/" + url.PathEscape(accountID)
-	response, err := s.httpClient.requestJSON(accountURL, adminAuthOptions(session))
+	response, err := s.httpClient.requestJSONContext(ctx, accountURL, adminAuthOptions(session))
 	if err != nil {
 		return Sub2APIAdminAccountState{}, err
 	}
@@ -2821,7 +2842,7 @@ func (s *PlatformService) updateSub2APIAdminAccountState(session Session, accoun
 	options := adminAuthOptions(session)
 	options.Method = http.MethodPut
 	options.Body = payload
-	updated, err := s.httpClient.requestJSON(accountURL, options)
+	updated, err := s.httpClient.requestJSONContext(ctx, accountURL, options)
 	if err != nil {
 		return Sub2APIAdminAccountState{}, err
 	}

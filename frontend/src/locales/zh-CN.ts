@@ -1636,7 +1636,8 @@ export default {
           loadFailed: '健康状态加载失败，请稍后重试。',
           settingsLoadFailed: '探活设置加载失败，请稍后重试。',
           settingsSaveFailed: '探活设置保存失败，请稍后重试。',
-          probeFailed: '手动探活失败，请稍后重试。'
+          probeFailed: '手动探活失败，请稍后重试。',
+          probeTimeout: '探活超时，请检查上游响应或稍后重试。'
         }
       },
       actions: {
