@@ -1059,7 +1059,7 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 			}
 			return "restored", desiredStatus, boolPointer(true)
 		}
-		if action.Conflict {
+		if action.Conflict && !reclaimManualConflict {
 			_ = repo.DeleteGroupRateMonitorAction(ctx, settings.UserID, settings.AdminAccountID, detail.TargetID)
 			return "manual_conflict_cleared", remote.Status, remote.Schedulable
 		}
@@ -1071,7 +1071,7 @@ func (s *Service) reconcileGroupRateMonitorAccount(ctx context.Context, repo gro
 				return RemoteActionSkippedBalanceSuspended, remote.Status, remote.Schedulable
 			}
 		}
-		if groupRateMonitorActionConflicted(*action, currentStatus, *currentSchedulable) {
+		if groupRateMonitorActionConflicted(*action, currentStatus, *currentSchedulable) && !reclaimManualConflict {
 			action.Conflict = true
 			action.PendingStatus = ""
 			action.PendingSchedulable = nil

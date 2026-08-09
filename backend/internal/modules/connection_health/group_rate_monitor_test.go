@@ -421,6 +421,45 @@ func TestGroupRateMonitorAutomaticSuccessOverridesManualDisabledAccount(t *testi
 	}
 }
 
+func TestGroupRateMonitorAutomaticSuccessReclaimsManualSchedulingToggle(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer server.Close()
+
+	repo := newFakeRepository()
+	schedulable := false
+	actions := &groupRateMonitorAccountActioner{states: map[string]upstream.Sub2APIAdminAccountState{
+		"account-1": {Name: "account 1", Status: "active", Schedulable: &schedulable},
+	}}
+	service := &Service{repo: repo, sites: fakeSiteLookup{site: &upstream.Site{ID: "site-1", BaseURL: server.URL}},
+		probeRunner: NewRealProbeRunner(), dispatchStates: actions, schedulingActions: actions}
+	settings := GroupRateMonitorSettings{UserID: "user-1", AdminAccountID: "ws-1", Enabled: true,
+		ProbeIntervalSeconds: 30, FailureThreshold: 2, DefaultModel: "gpt-test"}
+	group := groupRateMonitorGroup{SiteID: "site-1", GroupID: "group-1", GroupName: "福利",
+		GroupKey: groupRateMonitorGroupKey("group-1", "福利"), Accounts: []my_sites.RealConnection{{
+			AdminAccountID: "account-1", AdminAccountName: "account 1", AdminPlatform: "sub2api", UpstreamKey: "upstream-group-key",
+		}}}
+	targetID := buildTargetID(string(upstream.PlatformSub2API), settings.AdminAccountID, "account-1")
+	repo.groupRateActions[groupRateWorkspaceKey(settings.UserID, settings.AdminAccountID)+"|"+targetID] = GroupRateMonitorActionState{
+		UserID: settings.UserID, AdminAccountID: settings.AdminAccountID, TargetID: targetID, AccountID: "account-1",
+		UpstreamSiteID: group.SiteID, UpstreamGroupKey: group.GroupKey, OriginalStatus: "active", OriginalSchedulable: true,
+		LastAppliedStatus: "inactive", LastAppliedSchedulable: false,
+	}
+
+	_, dispatch, err := service.runGroupRateProbeCycle(context.Background(), settings, upstream.Session{Platform: upstream.PlatformSub2API}, group, "gpt-test", "scheduled")
+	if err != nil {
+		t.Fatalf("automatic recovery probe: %v", err)
+	}
+	if len(actions.calls) != 1 || actions.calls[0].state.Status != "active" || !actions.calls[0].state.Schedulable {
+		t.Fatalf("automatic probe must reclaim a manually disabled scheduling toggle: %+v", actions.calls)
+	}
+	if len(dispatch) != 1 || dispatch[0].ActionResult != "restored" || dispatch[0].Schedulable == nil || !*dispatch[0].Schedulable {
+		t.Fatalf("automatic response must return restored dispatch state: %+v", dispatch)
+	}
+}
+
 func TestGroupRateMonitorMissingDownstreamAccountDoesNotHideHealthyUpstream(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
