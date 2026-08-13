@@ -1331,7 +1331,7 @@ export default {
         import: {
           action: '导入站点',
           title: '从其他工作区导入站点',
-          description: '只复制站点配置和登录会话，不会复制分组对接或下游账号。',
+          description: '复制站点配置和加密登录凭据，不会复制分组对接或下游账号。导入后会用原账号密码重新登录。',
           loading: '正在读取其他工作区的站点',
           empty: '没有可导入的其他工作区站点。',
           alreadyImported: '当前工作区已存在',
@@ -1497,6 +1497,8 @@ export default {
         invalidUrl: '站点 URL 无效，请检查后重试。',
         network: '网络或 CORS 请求失败，请检查站点地址与跨域配置。',
         auth: '登录失败，请检查账号或密码。',
+        credentialEncryptionUnavailable: '无法安全保存上游账号密码，请先配置 UPSTREAM_CREDENTIAL_ENCRYPTION_KEY。',
+        credentialDecryptFailed: '上游账号密码解密失败，请重新编辑原站点并保存密码。',
         request: '上游接口请求失败，请稍后重试。',
         invalidResponse: '上游返回内容无法解析。',
         tokenMissing: '登录成功但未返回访问令牌。',

@@ -2,6 +2,7 @@ package upstream
 
 import (
 	"context"
+	"crypto/cipher"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -21,6 +22,15 @@ type SiteRepository interface {
 	ListImportCandidates(ctx context.Context, userID, currentAdminAccountID string) ([]ImportCandidate, error)
 	SaveSite(ctx context.Context, site Site) error
 	DeleteSite(ctx context.Context, userID string, id string) error
+}
+
+func (s *Service) SetCredentialEncryptionKey(raw string) error {
+	gcm, err := parseCredentialEncryptionKey(raw)
+	if err != nil {
+		return err
+	}
+	s.credentialGCM = gcm
+	return nil
 }
 
 func (s *Service) ListImportCandidates(ctx context.Context, userID string) ([]ImportCandidate, error) {
@@ -88,34 +98,68 @@ func (s *Service) ImportSites(ctx context.Context, userID string, dto ImportRequ
 			continue
 		}
 		if source.Session == nil || !source.Session.IsAuthenticated() {
-			result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "credentials_unavailable"})
-			continue
+			if source.PasswordCiphertext == "" {
+				result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "credentials_unavailable"})
+				continue
+			}
 		}
 
 		id, err := randomID()
 		if err != nil {
 			return result, err
 		}
-		session := *source.Session
-		if source.Session.ExpiresAt != nil {
-			expiresAt := *source.Session.ExpiresAt
-			session.ExpiresAt = &expiresAt
+		var session *Session
+		if source.Session != nil {
+			copiedSession := *source.Session
+			if source.Session.ExpiresAt != nil {
+				expiresAt := *source.Session.ExpiresAt
+				copiedSession.ExpiresAt = &expiresAt
+			}
+			session = &copiedSession
+		}
+		passwordCiphertext := source.PasswordCiphertext
+		password := ""
+		if passwordCiphertext != "" {
+			password, err = decryptCredentialPassword(s.credentialGCM, userID, source.AdminAccountID, passwordCiphertext)
+			if err != nil {
+				result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "credentials_unavailable"})
+				continue
+			}
+			passwordCiphertext, err = encryptCredentialPassword(s.credentialGCM, userID, adminAccountID, password)
+			if err != nil {
+				result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "credentials_unavailable"})
+				continue
+			}
 		}
 		imported := &Site{
-			ID:                id,
-			UserID:            userID,
-			AdminAccountID:    adminAccountID,
-			Name:              source.Name,
-			BaseURL:           source.BaseURL,
-			Platform:          source.Platform,
-			RequestedPlatform: source.RequestedPlatform,
-			Account:           source.Account,
-			Remark:            source.Remark,
-			RechargeRate:      source.RechargeRate,
-			Status:            StatusConnected,
-			Metrics:           defaultMetrics(),
-			Settings:          source.Settings,
-			Session:           &session,
+			ID:                 id,
+			UserID:             userID,
+			AdminAccountID:     adminAccountID,
+			Name:               source.Name,
+			BaseURL:            source.BaseURL,
+			Platform:           source.Platform,
+			RequestedPlatform:  source.RequestedPlatform,
+			Account:            source.Account,
+			Remark:             source.Remark,
+			RechargeRate:       source.RechargeRate,
+			Status:             StatusConnected,
+			Metrics:            defaultMetrics(),
+			Settings:           source.Settings,
+			Session:            session,
+			PasswordCiphertext: passwordCiphertext,
+		}
+		if password != "" && s.platformService != nil {
+			if loginResult, loginErr := s.platformService.LoginContext(ctx, source.BaseURL, source.Platform, source.Account, password); loginErr == nil {
+				imported.Session = &loginResult.Session
+				imported.Metrics = loginResult.Metrics
+			} else {
+				log.Printf("[upstream] imported site password login failed id=%s key=%s; trying saved session", imported.ID, errorKey(loginErr))
+				if imported.Session == nil || !imported.Session.IsAuthenticated() {
+					imported.Status = StatusError
+					key := errorKey(loginErr)
+					imported.ErrorKey = &key
+				}
+			}
 		}
 		if err := s.setCachedSite(ctx, imported); err != nil {
 			return result, err
@@ -185,6 +229,7 @@ type Service struct {
 	cache             SiteCache
 	accounts          AdminAccountResolver
 	connectionCleaner SiteConnectionCleaner
+	credentialGCM     cipher.AEAD
 	refreshConfig     RefreshConfig
 	timers            map[string]*time.Timer
 	deletedSites      map[string]struct{}
@@ -543,24 +588,32 @@ func (s *Service) Create(ctx context.Context, userID string, dto CreateRequest) 
 		account = strings.TrimSpace(dto.UserID)
 	}
 	site := &Site{
-		ID:                id,
-		UserID:            userID,
-		AdminAccountID:    adminAccountID,
-		Name:              strings.TrimSpace(dto.Name),
-		BaseURL:           strings.TrimSpace(dto.SiteURL),
-		Platform:          platform,
-		RequestedPlatform: requestedPlatform,
-		Account:           account,
-		Remark:            strings.TrimSpace(dto.Remark),
-		RechargeRate:      dto.RechargeRate,
-		Status:            StatusConnecting,
-		ErrorKey:          nil,
-		Metrics:           defaultMetrics(),
-		LastSyncedAt:      nil,
-		Session:           nil,
+		ID:                 id,
+		UserID:             userID,
+		AdminAccountID:     adminAccountID,
+		Name:               strings.TrimSpace(dto.Name),
+		BaseURL:            strings.TrimSpace(dto.SiteURL),
+		Platform:           platform,
+		RequestedPlatform:  requestedPlatform,
+		Account:            account,
+		Remark:             strings.TrimSpace(dto.Remark),
+		RechargeRate:       dto.RechargeRate,
+		Status:             StatusConnecting,
+		ErrorKey:           nil,
+		Metrics:            defaultMetrics(),
+		LastSyncedAt:       nil,
+		Session:            nil,
+		PasswordCiphertext: "",
 	}
 
 	// 先写入缓存和数据库。
+	if normalizedAuthMode(dto.AuthMode) == AuthModePassword && strings.TrimSpace(dto.Password) != "" {
+		ciphertext, encryptErr := encryptCredentialPassword(s.credentialGCM, userID, adminAccountID, dto.Password)
+		if encryptErr != nil {
+			return Response{}, encryptErr
+		}
+		site.PasswordCiphertext = ciphertext
+	}
 	if err := s.setCachedSite(ctx, site); err != nil {
 		return Response{}, err
 	}
@@ -654,7 +707,16 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 	}
 	site.Remark = strings.TrimSpace(dto.Remark)
 	site.RechargeRate = dto.RechargeRate
-	shouldRelogin := strings.TrimSpace(dto.Password) != "" || strings.TrimSpace(dto.AccessToken) != "" || strings.TrimSpace(dto.RefreshToken) != ""
+	newPassword := dto.Password
+	passwordProvided := strings.TrimSpace(newPassword) != ""
+	var newPasswordCiphertext string
+	if normalizedAuthMode(dto.AuthMode) == AuthModePassword && passwordProvided {
+		newPasswordCiphertext, err = encryptCredentialPassword(s.credentialGCM, userID, aid, newPassword)
+		if err != nil {
+			return Response{}, err
+		}
+	}
+	shouldRelogin := passwordProvided || strings.TrimSpace(dto.AccessToken) != "" || strings.TrimSpace(dto.RefreshToken) != ""
 
 	if shouldRelogin {
 		// 先保存基本字段更新到缓存。
@@ -698,6 +760,9 @@ func (s *Service) Update(ctx context.Context, userID string, id string, dto Upda
 		site.Platform = result.Platform
 		site.Session = &result.Session
 		site.Metrics = result.Metrics
+		if newPasswordCiphertext != "" {
+			site.PasswordCiphertext = newPasswordCiphertext
+		}
 		if site.BalanceSuspended {
 			site.Status = StatusDisabled
 		} else {

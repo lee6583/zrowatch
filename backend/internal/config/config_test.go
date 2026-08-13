@@ -100,3 +100,25 @@ func TestLoadReadsRawSMTPEncryptionKey(t *testing.T) {
 		t.Fatalf("expected raw SMTPEncryptionKey to be read as-is, got %q", cfg.SMTPEncryptionKey)
 	}
 }
+
+func TestLoadUpstreamCredentialKeyPrefersDedicatedValue(t *testing.T) {
+	t.Setenv("SMTP_ENCRYPTION_KEY", "smtp-key")
+	t.Setenv("UPSTREAM_CREDENTIAL_ENCRYPTION_KEY", "upstream-key")
+
+	cfg := Load()
+
+	if cfg.UpstreamCredentialEncryptionKey != "upstream-key" {
+		t.Fatalf("expected dedicated upstream key, got %q", cfg.UpstreamCredentialEncryptionKey)
+	}
+}
+
+func TestLoadUpstreamCredentialKeyFallsBackToSMTPKey(t *testing.T) {
+	t.Setenv("SMTP_ENCRYPTION_KEY", "smtp-key")
+	t.Setenv("UPSTREAM_CREDENTIAL_ENCRYPTION_KEY", "")
+
+	cfg := Load()
+
+	if cfg.UpstreamCredentialEncryptionKey != "smtp-key" {
+		t.Fatalf("expected SMTP fallback key, got %q", cfg.UpstreamCredentialEncryptionKey)
+	}
+}

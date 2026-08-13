@@ -164,6 +164,12 @@ openssl rand -base64 32
 
 该值必须是 base64 编码的 32 字节随机值，且一经设置需要长期稳定保存；更换 key 后，旧的 SMTP 密码密文将无法解密，需要重新填写并保存密码。
 
+上游站点的账号密码使用 AES-256-GCM 加密保存。建议单独配置长期稳定的 `UPSTREAM_CREDENTIAL_ENCRYPTION_KEY`；未配置时为兼容旧部署会复用 `SMTP_ENCRYPTION_KEY`。密钥变更后已保存的上游密码无法解密，需要在原工作区重新编辑站点并保存密码。生成方式：
+
+```bash
+openssl rand -base64 32
+```
+
 ### 开发依赖服务
 
 本地开发只启动 PostgreSQL 和 Redis：

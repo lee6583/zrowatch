@@ -63,6 +63,7 @@ type sitePayload struct {
 	Settings           SiteSettings `json:"settings"`
 	LastSyncedAt       *int64       `json:"lastSyncedAt"`
 	Session            *Session     `json:"session,omitempty"`
+	PasswordCiphertext string       `json:"passwordCiphertext,omitempty"`
 }
 
 func toPayload(site *Site) sitePayload {
@@ -86,6 +87,7 @@ func toPayload(site *Site) sitePayload {
 		Settings:           site.Settings,
 		LastSyncedAt:       site.LastSyncedAt,
 		Session:            site.Session,
+		PasswordCiphertext: site.PasswordCiphertext,
 	}
 }
 
@@ -110,6 +112,7 @@ func fromPayload(p sitePayload) *Site {
 		Settings:           p.Settings,
 		LastSyncedAt:       p.LastSyncedAt,
 		Session:            p.Session,
+		PasswordCiphertext: p.PasswordCiphertext,
 	}
 }
 

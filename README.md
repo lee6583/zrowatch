@@ -164,6 +164,12 @@ openssl rand -base64 32
 
 This must be a base64-encoded 32-byte value, and it must be kept stable long-term once set. Rotating the key makes any previously saved SMTP password ciphertext undecryptable, requiring the password to be re-entered and saved.
 
+Upstream site passwords are stored using AES-256-GCM encryption. Configure a stable `UPSTREAM_CREDENTIAL_ENCRYPTION_KEY`; for compatibility with older deployments it falls back to `SMTP_ENCRYPTION_KEY` when unset. Changing the key makes saved upstream passwords unreadable, so they must be re-entered in the source workspace. Generate one with:
+
+```bash
+openssl rand -base64 32
+```
+
 ### Development Services
 
 For local development dependencies only:

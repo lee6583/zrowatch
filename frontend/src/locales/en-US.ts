@@ -1331,7 +1331,7 @@ export default {
         import: {
           action: 'Import Site',
           title: 'Import From Another Workspace',
-          description: 'Only the site configuration and session are copied. Group bindings and downstream accounts are not copied.',
+          description: 'Site configuration and encrypted login credentials are copied. Group bindings and downstream accounts are not copied. The imported site signs in again with the original account and password.',
           loading: 'Loading sites from other workspaces',
           empty: 'There are no importable sites in other workspaces.',
           alreadyImported: 'Already in current workspace',
@@ -1497,6 +1497,8 @@ export default {
         invalidUrl: 'The site URL is invalid. Check it and try again.',
         network: 'Network or CORS request failed. Check the site URL and cross-origin settings.',
         auth: 'Login failed. Check the account or password.',
+        credentialEncryptionUnavailable: 'Cannot securely save upstream credentials. Configure UPSTREAM_CREDENTIAL_ENCRYPTION_KEY first.',
+        credentialDecryptFailed: 'Unable to decrypt the upstream password. Edit the original site and save the password again.',
         request: 'The upstream API request failed. Try again later.',
         invalidResponse: 'The upstream response could not be parsed.',
         tokenMissing: 'Login succeeded but no access token was returned.',

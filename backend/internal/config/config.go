@@ -50,6 +50,8 @@ type Config struct {
 	// SMTP 密码加密密钥：base64 编码的 32 字节 AES-256-GCM key，由 settings 模块解析和校验。
 	// 应用启动时是可选项，缺失不影响启动；这里只原样读取环境变量原值，不做任何解析或校验。
 	SMTPEncryptionKey string
+	// 上游站点账号密码加密密钥；未单独配置时兼容复用 SMTPEncryptionKey。
+	UpstreamCredentialEncryptionKey string
 }
 
 func Load() Config {
@@ -84,7 +86,8 @@ func Load() Config {
 
 		TicketUploadDir: envOrDefault("TICKET_UPLOAD_DIR", "data/ticket-uploads"),
 
-		SMTPEncryptionKey: os.Getenv("SMTP_ENCRYPTION_KEY"),
+		SMTPEncryptionKey:               os.Getenv("SMTP_ENCRYPTION_KEY"),
+		UpstreamCredentialEncryptionKey: envOrDefault("UPSTREAM_CREDENTIAL_ENCRYPTION_KEY", os.Getenv("SMTP_ENCRYPTION_KEY")),
 	}
 }
 

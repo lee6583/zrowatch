@@ -86,6 +86,11 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	platformService := upstream.NewPlatformService(upstream.NewHTTPClient(upstreamHTTPClient))
 	upstreamCache := upstream.NewRedisSiteCache(redisClient)
 	upstreamService := upstream.NewService(platformService, upstreamRepository, groupRateSnapshotWriter{service: groupRatesService}, upstreamCache)
+	// Password-based upstream credentials are stored as AES-256-GCM ciphertext.
+	// The key must remain stable across restarts and workspace imports.
+	if err := upstreamService.SetCredentialEncryptionKey(cfg.UpstreamCredentialEncryptionKey); err != nil {
+		panic(err)
+	}
 	upstreamService.SetAdminAccountResolver(adminAccountsService)
 	upstream.RegisterRoutes(server.mux, upstreamService, adminAccountsService)
 	mySitesService := my_sites.NewService(my_sites.NewRepository(db), platformService, upstreamService)

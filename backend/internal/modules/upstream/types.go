@@ -201,6 +201,7 @@ type Site struct {
 	Settings           SiteSettings `json:"settings"`
 	LastSyncedAt       *int64       `json:"lastSyncedAt"`
 	Session            *Session     `json:"-"`
+	PasswordCiphertext string       `json:"-"`
 }
 
 type Response struct {
