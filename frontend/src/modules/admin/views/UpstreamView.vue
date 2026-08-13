@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff, CircleHelp, ArrowUpDown } from 'lucide-vue-next'
+import { Search, Plus, CheckCircle2, XCircle, X, Loader2, AlertCircle, Trash2, Edit2, RefreshCw, Settings2, PowerOff, CircleHelp, ArrowUpDown, Download } from 'lucide-vue-next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
@@ -10,7 +10,8 @@ import { getDownstreamConsumption, getMySiteMappingOptions, listRealConnections 
 import { getStrategySettings } from '../api/settings'
 import { useUpstreamSites } from '../composables/useUpstreamSites'
 import SiteSettingsModal from '../components/upstream/SiteSettingsModal.vue'
-import type { UpstreamGroupInfo, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
+import { listUpstreamImportCandidates } from '../api/upstream'
+import type { UpstreamGroupInfo, UpstreamImportCandidate, UpstreamMetricValue, UpstreamSite, UpstreamSiteForm, UpstreamStatus } from '../types/upstream'
 import type { DownstreamConsumptionItem, DownstreamConsumptionStatus } from '../types/mySites'
 
 const { t, te, locale } = useI18n()
@@ -84,7 +85,13 @@ const addConnectedGroupKeys = (keys: Set<string>, siteId: string, groupId?: stri
   if (groupName?.trim()) keys.add(groupTargetKey(normalizedSiteId, groupName))
 }
 const isAddModalOpen = ref(false)
-const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
+const isImportModalOpen = ref(false)
+const importCandidates = ref<UpstreamImportCandidate[]>([])
+const selectedImportSiteIds = ref(new Set<string>())
+const isLoadingImportCandidates = ref(false)
+const isImporting = ref(false)
+const importErrorKey = ref<string | null>(null)
+const { sites: upstreamSites, isAdding, isRefreshing, addErrorKey, connectedCount, siteSyncStates, syncingSiteIds, addSite, updateSite, deleteSite, importSites, streamRefreshSites, refreshSingleSite } = useUpstreamSites()
 const deletingSiteId = ref<string | null>(null)
 const deleteErrorKey = ref<string | null>(null)
 const editingSiteId = ref<string | null>(null)
@@ -321,6 +328,66 @@ const statusErrorTooltip = (site: UpstreamSite): string => {
     ? t(errorKey)
     : t('admin.upstream.errors.unknown')
   return t('admin.upstream.status.errorTooltip', { reason })
+}
+
+const closeImportModal = () => {
+  isImportModalOpen.value = false
+  selectedImportSiteIds.value = new Set()
+  importErrorKey.value = null
+}
+
+const openImportModal = async () => {
+  isImportModalOpen.value = true
+  isLoadingImportCandidates.value = true
+  importErrorKey.value = null
+  try {
+    importCandidates.value = await listUpstreamImportCandidates()
+    selectedImportSiteIds.value = new Set()
+  } catch (error) {
+    importErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.request'
+  } finally {
+    isLoadingImportCandidates.value = false
+  }
+}
+
+const toggleImportCandidate = (candidate: UpstreamImportCandidate) => {
+  if (!candidate.importable || candidate.alreadyImported) return
+  const next = new Set(selectedImportSiteIds.value)
+  if (next.has(candidate.sourceSiteId)) next.delete(candidate.sourceSiteId)
+  else next.add(candidate.sourceSiteId)
+  selectedImportSiteIds.value = next
+}
+
+const importCandidatesByWorkspace = computed(() => {
+  const groups = new Map<string, UpstreamImportCandidate[]>()
+  for (const candidate of importCandidates.value) {
+    const key = candidate.sourceWorkspaceId || candidate.sourceWorkspace
+    const current = groups.get(key) ?? []
+    current.push(candidate)
+    groups.set(key, current)
+  }
+  return Array.from(groups.entries()).map(([key, candidates]) => ({
+    key,
+    name: candidates[0]?.sourceWorkspace || key,
+    candidates,
+  }))
+})
+
+const confirmImportSites = async () => {
+  const ids = Array.from(selectedImportSiteIds.value)
+  if (ids.length === 0 || isImporting.value) return
+  isImporting.value = true
+  importErrorKey.value = null
+  try {
+    await importSites(ids)
+    closeImportModal()
+    await loadConnectedGroupKeys()
+    await loadDownstreamConsumption()
+  } catch (error) {
+    importErrorKey.value = error instanceof Error ? error.message : 'admin.upstream.errors.request'
+  } finally {
+    isImporting.value = false
+  }
 }
 
 const deletingSite = computed(() => upstreamSites.value.find((site) => site.id === deletingSiteId.value) ?? null)
@@ -608,6 +675,10 @@ onBeforeUnmount(() => {
           <RefreshCw v-else class="w-4 h-4" />
           {{ isRefreshing ? t('admin.upstream.refresh.refreshing') : t('admin.upstream.refresh.action') }}
         </Button>
+        <Button :disabled="isRefreshing" @click="openImportModal" variant="secondary" class="h-10 flex-1 gap-2 px-4 sm:flex-none">
+          <Download class="w-4 h-4" />
+          {{ t('admin.upstream.import.action') }}
+        </Button>
         <Button @click="isAddModalOpen = true" class="h-10 flex-1 gap-2 px-4 shadow-sm sm:flex-none">
           <Plus class="w-4 h-4" />
           {{ t('admin.upstream.addSite') }}
@@ -885,6 +956,63 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
+
+    <!-- Import Site Modal -->
+    <Teleport defer to="body">
+      <div v-if="isImportModalOpen" class="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-0">
+        <div class="absolute inset-0 bg-background/80 backdrop-blur-sm" @click="closeImportModal"></div>
+        <div role="dialog" aria-modal="true" :aria-label="t('admin.upstream.import.title')" class="relative max-h-[calc(100dvh-2rem)] w-full max-w-2xl overflow-hidden rounded-xl border border-border/60 border-t-2 border-t-primary bg-card shadow-2xl">
+          <div class="flex items-center justify-between border-b border-border/40 px-6 py-5">
+            <div>
+              <h3 class="text-lg font-semibold text-foreground">{{ t('admin.upstream.import.title') }}</h3>
+              <p class="mt-1 text-xs text-muted-foreground">{{ t('admin.upstream.import.description') }}</p>
+            </div>
+            <button type="button" @click="closeImportModal" class="rounded-md p-1 text-muted-foreground hover:bg-surface-elevated hover:text-foreground" :aria-label="t('admin.upstream.import.cancel')">
+              <X class="h-5 w-5" />
+            </button>
+          </div>
+          <div class="max-h-[60dvh] overflow-y-auto p-6">
+            <div v-if="importErrorKey" class="mb-4 flex items-start gap-2 rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm text-destructive" role="alert">
+              <AlertCircle class="mt-0.5 h-4 w-4 shrink-0" />
+              <span>{{ t(importErrorKey) }}</span>
+            </div>
+            <div v-if="isLoadingImportCandidates" class="flex items-center justify-center gap-2 py-12 text-sm text-muted-foreground">
+              <Loader2 class="h-4 w-4 animate-spin" />
+              {{ t('admin.upstream.import.loading') }}
+            </div>
+            <div v-else-if="importCandidates.length === 0" class="py-12 text-center text-sm text-muted-foreground">
+              {{ t('admin.upstream.import.empty') }}
+            </div>
+            <div v-else class="space-y-6">
+              <section v-for="workspace in importCandidatesByWorkspace" :key="workspace.key" class="space-y-3">
+                <h4 class="text-sm font-semibold text-foreground">{{ workspace.name }}</h4>
+                <div class="space-y-2">
+                  <label v-for="candidate in workspace.candidates" :key="candidate.sourceSiteId" class="flex cursor-pointer items-start gap-3 rounded-lg border border-border/50 bg-surface/40 p-3 transition-colors hover:border-primary/50" :class="candidate.alreadyImported || !candidate.importable ? 'cursor-not-allowed opacity-55' : ''">
+                    <input type="checkbox" class="mt-1 h-4 w-4 rounded border-border text-primary" :checked="selectedImportSiteIds.has(candidate.sourceSiteId)" :disabled="candidate.alreadyImported || !candidate.importable || isImporting" @change="toggleImportCandidate(candidate)" />
+                    <span class="min-w-0 flex-1">
+                      <span class="flex flex-wrap items-center gap-2 text-sm font-medium text-foreground">
+                        <span>{{ candidate.name }}</span>
+                        <span class="rounded bg-primary/10 px-1.5 py-0.5 text-[10px] uppercase text-primary">{{ candidate.platform }}</span>
+                        <span v-if="candidate.alreadyImported" class="text-xs text-muted-foreground">{{ t('admin.upstream.import.alreadyImported') }}</span>
+                        <span v-else-if="!candidate.importable" class="text-xs text-warning">{{ t('admin.upstream.import.unavailable') }}</span>
+                      </span>
+                      <span class="mt-1 block truncate text-xs text-muted-foreground" :title="candidate.baseUrl">{{ candidate.baseUrl }}</span>
+                    </span>
+                  </label>
+                </div>
+              </section>
+            </div>
+          </div>
+          <div class="flex items-center justify-end gap-3 border-t border-border/40 p-4">
+            <Button type="button" variant="ghost" :disabled="isImporting" @click="closeImportModal">{{ t('admin.upstream.import.cancel') }}</Button>
+            <Button type="button" :disabled="selectedImportSiteIds.size === 0 || isImporting" @click="confirmImportSites">
+              <Loader2 v-if="isImporting" class="h-4 w-4 animate-spin" />
+              {{ isImporting ? t('admin.upstream.import.importing') : t('admin.upstream.import.confirm') }}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
 
     <!-- Groups Modal -->
     <Teleport defer to="body">

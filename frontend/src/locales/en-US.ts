@@ -1328,6 +1328,18 @@ export default {
           historyRechargeAsc: 'Recharge low to high'
         },
         addSite: 'Add Site',
+        import: {
+          action: 'Import Site',
+          title: 'Import From Another Workspace',
+          description: 'Only the site configuration and session are copied. Group bindings and downstream accounts are not copied.',
+          loading: 'Loading sites from other workspaces',
+          empty: 'There are no importable sites in other workspaces.',
+          alreadyImported: 'Already in current workspace',
+          unavailable: 'Credentials unavailable',
+          cancel: 'Cancel',
+          confirm: 'Import Selected',
+          importing: 'Importing...'
+        },
         summary: '{connected} / {total} upstream sites connected',
         refresh: {
           action: 'Refresh Data',

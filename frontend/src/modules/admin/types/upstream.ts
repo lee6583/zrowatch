@@ -94,6 +94,23 @@ export interface UpstreamSite {
 
 export type UpstreamSiteResponse = Omit<UpstreamSite, 'session' | 'logo' | 'logoBg'>
 
+export interface UpstreamImportCandidate {
+  sourceSiteId: string
+  sourceWorkspaceId: string
+  sourceWorkspace: string
+  name: string
+  baseUrl: string
+  platform: ResolvedUpstreamPlatform
+  account: string
+  alreadyImported: boolean
+  importable: boolean
+}
+
+export interface UpstreamImportResult {
+  imported: UpstreamSiteResponse[]
+  skipped: Array<{ sourceSiteId: string; reason: string }>
+}
+
 export interface UpstreamLoginResult {
   platform: ResolvedUpstreamPlatform
   baseUrl: string

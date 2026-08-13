@@ -25,6 +25,8 @@ type HandlerAccountResolver interface {
 func RegisterRoutes(mux *http.ServeMux, service *Service, accounts HandlerAccountResolver) {
 	handler := &Handler{service: service, accounts: accounts}
 	mux.HandleFunc("GET /api/upstream-sites", handler.list)
+	mux.HandleFunc("GET /api/upstream-sites/import-candidates", handler.importCandidates)
+	mux.HandleFunc("POST /api/upstream-sites/import", handler.importSites)
 	mux.HandleFunc("POST /api/upstream-sites", handler.create)
 	mux.HandleFunc("POST /api/upstream-sites/sync-all", handler.syncAll)
 	mux.HandleFunc("GET /api/upstream-sites/sync-stream", handler.syncStream)
@@ -32,6 +34,39 @@ func RegisterRoutes(mux *http.ServeMux, service *Service, accounts HandlerAccoun
 	mux.HandleFunc("PATCH /api/upstream-sites/", handler.update)
 	mux.HandleFunc("POST /api/upstream-sites/", handler.sync)
 	mux.HandleFunc("DELETE /api/upstream-sites/", handler.remove)
+}
+
+func (h *Handler) importCandidates(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	items, err := h.service.ListImportCandidates(r.Context(), userID)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusOK, items)
+}
+
+func (h *Handler) importSites(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authctx.UserID(r.Context())
+	if !ok {
+		httpjson.WriteError(w, http.StatusUnauthorized, "auth.errors.unauthorized")
+		return
+	}
+	var dto ImportRequest
+	if err := httpjson.Decode(r, &dto); err != nil {
+		httpjson.WriteError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+	result, err := h.service.ImportSites(r.Context(), userID, dto)
+	if err != nil {
+		writeUpstreamError(w, err)
+		return
+	}
+	httpjson.Write(w, http.StatusCreated, result)
 }
 
 func (h *Handler) syncAll(w http.ResponseWriter, r *http.Request) {

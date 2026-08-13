@@ -18,8 +18,127 @@ const (
 type SiteRepository interface {
 	ListSites(ctx context.Context) ([]Site, error)
 	ListSitesForUser(ctx context.Context, userID string) ([]Site, error)
+	ListImportCandidates(ctx context.Context, userID, currentAdminAccountID string) ([]ImportCandidate, error)
 	SaveSite(ctx context.Context, site Site) error
 	DeleteSite(ctx context.Context, userID string, id string) error
+}
+
+func (s *Service) ListImportCandidates(ctx context.Context, userID string) ([]ImportCandidate, error) {
+	adminAccountID, err := s.requireCurrentAdminAccountID(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	if s.repository == nil {
+		return []ImportCandidate{}, nil
+	}
+	return s.repository.ListImportCandidates(ctx, userID, adminAccountID)
+}
+
+// ImportSites copies only upstream site configuration and credentials. Runtime
+// metrics and every downstream binding live outside this copy and are reset.
+func (s *Service) ImportSites(ctx context.Context, userID string, dto ImportRequest) (ImportResult, error) {
+	s.importMu.Lock()
+	defer s.importMu.Unlock()
+
+	result := ImportResult{Imported: []Response{}, Skipped: []ImportSkipped{}}
+	if len(dto.SourceSiteIDs) == 0 || len(dto.SourceSiteIDs) > 100 {
+		return result, newRequestError(ErrorRequest, "")
+	}
+	adminAccountID, err := s.requireCurrentAdminAccountID(ctx, userID)
+	if err != nil {
+		return result, err
+	}
+	if s.repository == nil {
+		return result, newRequestError(ErrorRequest, "")
+	}
+
+	sites, err := s.repository.ListSitesForUser(ctx, userID)
+	if err != nil {
+		return result, err
+	}
+	sources := make(map[string]Site, len(sites))
+	destinationURLs := make(map[string]struct{})
+	for _, site := range sites {
+		if site.AdminAccountID == adminAccountID {
+			destinationURLs[normalizeImportSiteKey(site.BaseURL, site.Platform)] = struct{}{}
+			continue
+		}
+		sources[site.ID] = site
+	}
+
+	seen := make(map[string]struct{}, len(dto.SourceSiteIDs))
+	for _, rawID := range dto.SourceSiteIDs {
+		sourceID := strings.TrimSpace(rawID)
+		if sourceID == "" {
+			continue
+		}
+		if _, exists := seen[sourceID]; exists {
+			continue
+		}
+		seen[sourceID] = struct{}{}
+
+		source, exists := sources[sourceID]
+		if !exists {
+			result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "not_found"})
+			continue
+		}
+		urlKey := normalizeImportSiteKey(source.BaseURL, source.Platform)
+		if _, exists := destinationURLs[urlKey]; exists {
+			result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "already_imported"})
+			continue
+		}
+		if source.Session == nil || !source.Session.IsAuthenticated() {
+			result.Skipped = append(result.Skipped, ImportSkipped{SourceSiteID: sourceID, Reason: "credentials_unavailable"})
+			continue
+		}
+
+		id, err := randomID()
+		if err != nil {
+			return result, err
+		}
+		session := *source.Session
+		if source.Session.ExpiresAt != nil {
+			expiresAt := *source.Session.ExpiresAt
+			session.ExpiresAt = &expiresAt
+		}
+		imported := &Site{
+			ID:                id,
+			UserID:            userID,
+			AdminAccountID:    adminAccountID,
+			Name:              source.Name,
+			BaseURL:           source.BaseURL,
+			Platform:          source.Platform,
+			RequestedPlatform: source.RequestedPlatform,
+			Account:           source.Account,
+			Remark:            source.Remark,
+			RechargeRate:      source.RechargeRate,
+			Status:            StatusConnected,
+			Metrics:           defaultMetrics(),
+			Settings:          source.Settings,
+			Session:           &session,
+		}
+		if err := s.setCachedSite(ctx, imported); err != nil {
+			return result, err
+		}
+		if err := s.saveSite(ctx, imported); err != nil {
+			_ = s.cache.Delete(ctx, imported.ID, userID)
+			return result, err
+		}
+		s.mu.Lock()
+		s.scheduleSyncLocked(imported.ID, imported)
+		s.mu.Unlock()
+		destinationURLs[urlKey] = struct{}{}
+		result.Imported = append(result.Imported, toResponse(imported))
+	}
+	return result, nil
+}
+
+func normalizeImportSiteURL(value string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(value), "/"))
+}
+
+func normalizeImportSiteKey(baseURL string, platform Platform) string {
+	return normalizeImportSiteURL(baseURL) + "\x00" + strings.ToLower(strings.TrimSpace(string(platform)))
 }
 
 type AdminAccountResolver interface {
@@ -52,6 +171,7 @@ type Service struct {
 	refreshConfig     RefreshConfig
 	timers            map[string]*time.Timer
 	deletedSites      map[string]struct{}
+	importMu          sync.Mutex
 	mu                sync.Mutex
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。

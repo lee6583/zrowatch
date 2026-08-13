@@ -145,6 +145,34 @@ type UpdateRequest struct {
 	RechargeRate float64  `json:"rechargeRate"`
 }
 
+// ImportCandidate is a safe, credential-free description of a site that can
+// be copied from another workspace owned by the same user.
+type ImportCandidate struct {
+	SourceSiteID      string   `json:"sourceSiteId"`
+	SourceWorkspaceID string   `json:"sourceWorkspaceId"`
+	SourceWorkspace   string   `json:"sourceWorkspace"`
+	Name              string   `json:"name"`
+	BaseURL           string   `json:"baseUrl"`
+	Platform          Platform `json:"platform"`
+	Account           string   `json:"account"`
+	AlreadyImported   bool     `json:"alreadyImported"`
+	Importable        bool     `json:"importable"`
+}
+
+type ImportRequest struct {
+	SourceSiteIDs []string `json:"sourceSiteIds"`
+}
+
+type ImportSkipped struct {
+	SourceSiteID string `json:"sourceSiteId"`
+	Reason       string `json:"reason"`
+}
+
+type ImportResult struct {
+	Imported []Response      `json:"imported"`
+	Skipped  []ImportSkipped `json:"skipped"`
+}
+
 // SiteSettings 站点级预警覆盖配置。nil 表示使用全局默认值。
 type SiteSettings struct {
 	BalanceThreshold *float64 `json:"balanceThreshold"`

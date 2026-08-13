@@ -1328,6 +1328,18 @@ export default {
           historyRechargeAsc: '历史充值从低到高'
         },
         addSite: '新增站点',
+        import: {
+          action: '导入站点',
+          title: '从其他工作区导入站点',
+          description: '只复制站点配置和登录会话，不会复制分组对接或下游账号。',
+          loading: '正在读取其他工作区的站点',
+          empty: '没有可导入的其他工作区站点。',
+          alreadyImported: '当前工作区已存在',
+          unavailable: '凭据不可用',
+          cancel: '取消',
+          confirm: '导入选中站点',
+          importing: '导入中...'
+        },
         summary: '已连接 {connected} / {total} 个上游站点',
         refresh: {
           action: '刷新数据',

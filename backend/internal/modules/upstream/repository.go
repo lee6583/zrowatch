@@ -121,6 +121,54 @@ func (r *Repository) ListSitesForUser(ctx context.Context, userID string) ([]Sit
 	return scanSites(rows)
 }
 
+func (r *Repository) ListImportCandidates(ctx context.Context, userID, currentAdminAccountID string) ([]ImportCandidate, error) {
+	rows, err := r.db.Query(ctx, `
+		SELECT source.id, source.admin_account_id, workspace.display_name,
+			source.name, source.base_url, source.platform, source.account,
+			EXISTS (
+				SELECT 1
+				FROM upstream_sites AS destination
+				WHERE destination.user_id = source.user_id
+					AND destination.admin_account_id = $2
+					AND lower(rtrim(destination.base_url, '/')) = lower(rtrim(source.base_url, '/'))
+					AND destination.platform = source.platform
+			),
+			source.session IS NOT NULL
+		FROM upstream_sites AS source
+		JOIN admin_accounts AS workspace
+			ON workspace.id = source.admin_account_id AND workspace.user_id = source.user_id
+		WHERE source.user_id = $1 AND source.admin_account_id <> $2
+		ORDER BY workspace.display_name ASC, source.name ASC, source.id ASC
+	`, userID, currentAdminAccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]ImportCandidate, 0)
+	for rows.Next() {
+		var item ImportCandidate
+		if err := rows.Scan(
+			&item.SourceSiteID,
+			&item.SourceWorkspaceID,
+			&item.SourceWorkspace,
+			&item.Name,
+			&item.BaseURL,
+			&item.Platform,
+			&item.Account,
+			&item.AlreadyImported,
+			&item.Importable,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 func (r *Repository) SaveSite(ctx context.Context, site Site) error {
 	metricsJSON, err := json.Marshal(site.Metrics)
 	if err != nil {

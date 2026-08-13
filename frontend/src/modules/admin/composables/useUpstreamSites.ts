@@ -7,6 +7,7 @@ import {
   syncAllUpstreamSites,
   syncUpstreamSite,
   updateUpstreamSite,
+  importUpstreamSites,
 } from '../api/upstream'
 import type { SiteSyncState, UpstreamMetricValue, UpstreamMetrics, UpstreamSite, UpstreamSiteForm, UpstreamSiteResponse } from '../types/upstream'
 
@@ -189,6 +190,13 @@ export const useUpstreamSites = () => {
     sites.value = sites.value.filter((site) => site.id !== id)
   }
 
+  const importSites = async (sourceSiteIds: string[]): Promise<UpstreamSiteResponse[]> => {
+    const result = await importUpstreamSites(sourceSiteIds, requestController.signal)
+    const imported = result.imported.map((site, index) => normalizeSite(site, logoClasses[(sites.value.length + index) % logoClasses.length]))
+    sites.value = [...imported, ...sites.value]
+    return result.imported
+  }
+
   void loadSites()
 
   onBeforeUnmount(() => {
@@ -210,6 +218,7 @@ export const useUpstreamSites = () => {
     refreshSites,
     streamRefreshSites,
     deleteSite,
+    importSites,
     loadSites,
   }
 }

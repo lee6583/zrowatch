@@ -3,6 +3,8 @@ import type {
   SyncStreamEvent,
   UpstreamSiteForm,
   UpstreamSiteResponse,
+  UpstreamImportCandidate,
+  UpstreamImportResult,
 } from '../types/upstream'
 import {
   authUnauthorizedErrorKey,
@@ -58,6 +60,18 @@ const requestJson = async <T>(path: string, options: RequestInit = {}): Promise<
 }
 
 export const listUpstreamSites = async (signal?: AbortSignal): Promise<UpstreamSiteResponse[]> => requestJson<UpstreamSiteResponse[]>('/upstream-sites', { signal })
+
+export const listUpstreamImportCandidates = async (signal?: AbortSignal): Promise<UpstreamImportCandidate[]> => (
+  requestJson<UpstreamImportCandidate[]>('/upstream-sites/import-candidates', { signal })
+)
+
+export const importUpstreamSites = async (sourceSiteIds: string[], signal?: AbortSignal): Promise<UpstreamImportResult> => (
+  requestJson<UpstreamImportResult>('/upstream-sites/import', {
+    method: 'POST',
+    body: JSON.stringify({ sourceSiteIds }),
+    signal,
+  })
+)
 
 export const createUpstreamSite = async (form: UpstreamSiteForm, signal?: AbortSignal): Promise<UpstreamSiteResponse> => (
   requestJson<UpstreamSiteResponse>('/upstream-sites', {
