@@ -124,11 +124,28 @@ func (s *Service) ImportSites(ctx context.Context, userID string, dto ImportRequ
 			_ = s.cache.Delete(ctx, imported.ID, userID)
 			return result, err
 		}
-		s.mu.Lock()
-		s.scheduleSyncLocked(imported.ID, imported)
-		s.mu.Unlock()
+
+		// A site import intentionally does not copy the source workspace's
+		// runtime metrics or group-rate snapshots. Populate this workspace's own
+		// group list immediately through the normal sync path instead, so the
+		// imported site is ready for new bindings as soon as the dialog closes.
+		response := toResponse(imported)
+		if s.platformService != nil {
+			if synced, syncErr := s.sync(ctx, imported.ID); syncErr != nil {
+				log.Printf("[upstream] imported site initial sync failed id=%s err=%v", imported.ID, syncErr)
+				if current, cacheErr := s.cache.Get(ctx, imported.ID); cacheErr == nil && current != nil {
+					response = toResponse(current)
+				}
+			} else {
+				response = synced
+			}
+		} else {
+			s.mu.Lock()
+			s.scheduleSyncLocked(imported.ID, imported)
+			s.mu.Unlock()
+		}
 		destinationURLs[urlKey] = struct{}{}
-		result.Imported = append(result.Imported, toResponse(imported))
+		result.Imported = append(result.Imported, response)
 	}
 	return result, nil
 }
