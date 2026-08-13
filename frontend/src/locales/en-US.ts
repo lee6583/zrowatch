@@ -1336,6 +1336,7 @@ export default {
           empty: 'There are no importable sites in other workspaces.',
           alreadyImported: 'Already in current workspace',
           unavailable: 'Credentials unavailable',
+          remainingBalance: 'Remaining balance: {balance}',
           cancel: 'Cancel',
           confirm: 'Import Selected',
           importing: 'Importing...'

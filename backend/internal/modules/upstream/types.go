@@ -155,6 +155,9 @@ type ImportCandidate struct {
 	BaseURL           string   `json:"baseUrl"`
 	Platform          Platform `json:"platform"`
 	Account           string   `json:"account"`
+	BalanceValue      *float64 `json:"balanceValue"`
+	BalanceDisplay    string   `json:"balanceDisplay"`
+	RechargeRate      float64  `json:"rechargeRate"`
 	AlreadyImported   bool     `json:"alreadyImported"`
 	Importable        bool     `json:"importable"`
 }

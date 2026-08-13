@@ -1336,6 +1336,7 @@ export default {
           empty: '没有可导入的其他工作区站点。',
           alreadyImported: '当前工作区已存在',
           unavailable: '凭据不可用',
+          remainingBalance: '剩余余额：{balance}',
           cancel: '取消',
           confirm: '导入选中站点',
           importing: '导入中...'

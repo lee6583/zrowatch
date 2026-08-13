@@ -125,6 +125,7 @@ func (r *Repository) ListImportCandidates(ctx context.Context, userID, currentAd
 	rows, err := r.db.Query(ctx, `
 		SELECT source.id, source.admin_account_id, workspace.display_name,
 			source.name, source.base_url, source.platform, source.account,
+			source.recharge_rate, source.metrics,
 			EXISTS (
 				SELECT 1
 				FROM upstream_sites AS destination
@@ -148,6 +149,7 @@ func (r *Repository) ListImportCandidates(ctx context.Context, userID, currentAd
 	items := make([]ImportCandidate, 0)
 	for rows.Next() {
 		var item ImportCandidate
+		var metricsJSON []byte
 		if err := rows.Scan(
 			&item.SourceSiteID,
 			&item.SourceWorkspaceID,
@@ -156,10 +158,17 @@ func (r *Repository) ListImportCandidates(ctx context.Context, userID, currentAd
 			&item.BaseURL,
 			&item.Platform,
 			&item.Account,
+			&item.RechargeRate,
+			&metricsJSON,
 			&item.AlreadyImported,
 			&item.Importable,
 		); err != nil {
 			return nil, err
+		}
+		var metrics Metrics
+		if err := json.Unmarshal(metricsJSON, &metrics); err == nil {
+			item.BalanceValue = metrics.Balance.Value
+			item.BalanceDisplay = metrics.Balance.Display
 		}
 		items = append(items, item)
 	}

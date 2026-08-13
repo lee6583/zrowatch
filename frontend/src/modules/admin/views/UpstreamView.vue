@@ -366,12 +366,38 @@ const importCandidatesByWorkspace = computed(() => {
     current.push(candidate)
     groups.set(key, current)
   }
+  const balanceValue = (candidate: UpstreamImportCandidate): number | null => {
+    if (candidate.balanceValue === null || !Number.isFinite(candidate.balanceValue)) return null
+    if (!Number.isFinite(candidate.rechargeRate) || candidate.rechargeRate <= 0) return candidate.balanceValue
+    return candidate.balanceValue * candidate.rechargeRate
+  }
+  const compareBalance = (first: UpstreamImportCandidate, second: UpstreamImportCandidate): number => {
+    const firstBalance = balanceValue(first)
+    const secondBalance = balanceValue(second)
+    if (firstBalance === null && secondBalance === null) return first.name.localeCompare(second.name, locale.value)
+    if (firstBalance === null) return 1
+    if (secondBalance === null) return -1
+    return secondBalance - firstBalance || first.name.localeCompare(second.name, locale.value)
+  }
   return Array.from(groups.entries()).map(([key, candidates]) => ({
     key,
     name: candidates[0]?.sourceWorkspace || key,
-    candidates,
-  }))
+    candidates: [...candidates].sort(compareBalance),
+    topBalance: [...candidates].sort(compareBalance)[0] ?? null,
+  })).sort((first, second) => {
+    if (!first.topBalance && !second.topBalance) return first.name.localeCompare(second.name, locale.value)
+    if (!first.topBalance) return 1
+    if (!second.topBalance) return -1
+    return compareBalance(first.topBalance, second.topBalance)
+  })
 })
+
+const importBalanceDisplay = (candidate: UpstreamImportCandidate): string => {
+  if (candidate.balanceValue !== null && Number.isFinite(candidate.balanceValue) && candidate.rechargeRate > 0) {
+    return t('admin.upstream.currency.cnyValue', { amount: (candidate.balanceValue * candidate.rechargeRate).toFixed(2) })
+  }
+  return candidate.balanceDisplay?.trim() || t('admin.upstream.fields.notSynced')
+}
 
 const confirmImportSites = async () => {
   const ids = Array.from(selectedImportSiteIds.value)
@@ -997,6 +1023,9 @@ onBeforeUnmount(() => {
                         <span v-else-if="!candidate.importable" class="text-xs text-warning">{{ t('admin.upstream.import.unavailable') }}</span>
                       </span>
                       <span class="mt-1 block truncate text-xs text-muted-foreground" :title="candidate.baseUrl">{{ candidate.baseUrl }}</span>
+                      <span class="mt-1 block text-xs font-medium text-signal">
+                        {{ t('admin.upstream.import.remainingBalance', { balance: importBalanceDisplay(candidate) }) }}
+                      </span>
                     </span>
                   </label>
                 </div>

@@ -102,6 +102,9 @@ export interface UpstreamImportCandidate {
   baseUrl: string
   platform: ResolvedUpstreamPlatform
   account: string
+  balanceValue: number | null
+  balanceDisplay: string
+  rechargeRate: number
   alreadyImported: boolean
   importable: boolean
 }
