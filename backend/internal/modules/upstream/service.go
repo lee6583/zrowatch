@@ -24,6 +24,13 @@ type SiteRepository interface {
 	DeleteSite(ctx context.Context, userID string, id string) error
 }
 
+// LoginFailureNotifier reports a site whose saved session and password login
+// are both unusable. Implementations must not return notification failures to
+// the sync path.
+type LoginFailureNotifier interface {
+	NotifyUpstreamLoginRequired(ctx context.Context, userID, adminAccountID, siteName, baseURL string)
+}
+
 func (s *Service) SetCredentialEncryptionKey(raw string) error {
 	gcm, err := parseCredentialEncryptionKey(raw)
 	if err != nil {
@@ -31,6 +38,10 @@ func (s *Service) SetCredentialEncryptionKey(raw string) error {
 	}
 	s.credentialGCM = gcm
 	return nil
+}
+
+func (s *Service) SetLoginFailureNotifier(notifier LoginFailureNotifier) {
+	s.loginFailureNotifier = notifier
 }
 
 func (s *Service) ListImportCandidates(ctx context.Context, userID string) ([]ImportCandidate, error) {
@@ -223,18 +234,20 @@ type RefreshConfig struct {
 // 站点运行时状态缓存在 Redis（通过 SiteCache），PostgreSQL 负责持久化。
 // 当系统设置开启了数据刷新频率时，定时器按配置的间隔自动同步各站点。
 type Service struct {
-	platformService   *PlatformService
-	snapshotWriter    SnapshotWriter
-	repository        SiteRepository
-	cache             SiteCache
-	accounts          AdminAccountResolver
-	connectionCleaner SiteConnectionCleaner
-	credentialGCM     cipher.AEAD
-	refreshConfig     RefreshConfig
-	timers            map[string]*time.Timer
-	deletedSites      map[string]struct{}
-	importMu          sync.Mutex
-	mu                sync.Mutex
+	platformService      *PlatformService
+	snapshotWriter       SnapshotWriter
+	repository           SiteRepository
+	cache                SiteCache
+	accounts             AdminAccountResolver
+	connectionCleaner    SiteConnectionCleaner
+	loginFailureNotifier LoginFailureNotifier
+	credentialGCM        cipher.AEAD
+	refreshConfig        RefreshConfig
+	timers               map[string]*time.Timer
+	deletedSites         map[string]struct{}
+	loginFailureAlerts   map[string]struct{}
+	importMu             sync.Mutex
+	mu                   sync.Mutex
 	// AfterSync 在站点同步成功后被调用，传入同步前后的指标数据。
 	// 由系统设置模块注入，用于余额预警和倍率变更检测。
 	AfterSync func(ctx context.Context, userID, adminAccountID, siteID, siteName string, oldMetrics, newMetrics Metrics)
@@ -259,12 +272,13 @@ func (s *Service) requireCurrentAdminAccountID(ctx context.Context, userID strin
 
 func NewService(platformService *PlatformService, repository SiteRepository, snapshotWriter SnapshotWriter, cache SiteCache) *Service {
 	return &Service{
-		platformService: platformService,
-		snapshotWriter:  snapshotWriter,
-		repository:      repository,
-		cache:           cache,
-		timers:          make(map[string]*time.Timer),
-		deletedSites:    make(map[string]struct{}),
+		platformService:    platformService,
+		snapshotWriter:     snapshotWriter,
+		repository:         repository,
+		cache:              cache,
+		timers:             make(map[string]*time.Timer),
+		deletedSites:       make(map[string]struct{}),
+		loginFailureAlerts: make(map[string]struct{}),
 	}
 }
 
@@ -1009,12 +1023,9 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	_ = s.setCachedSite(ctx, site)
 	session := *site.Session
 
-	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。
-	refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
-	metrics := Metrics{}
-	if refreshErr == nil {
-		metrics, refreshErr = s.platformService.FetchMetricsContext(ctx, refreshedSession)
-	}
+	// 刷新会话并拉取指标（无锁操作，可能耗时较长）。Sub2API 会话失效时，
+	// 使用安全保存的密码重新登录一次，并用新 token 替换旧会话。
+	refreshedSession, metrics, reloginRequired, refreshErr := s.refreshSiteSession(ctx, site, session)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		restoreCtx, cancel := context.WithTimeout(context.Background(), persistenceTimeout)
 		defer cancel()
@@ -1046,6 +1057,9 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 			site.Status = StatusError
 		}
 		key := errorKey(refreshErr)
+		if reloginRequired {
+			key = ErrorReloginRequired
+		}
 		site.ErrorKey = &key
 	} else {
 		now := time.Now().UnixMilli()
@@ -1070,13 +1084,124 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	if saveErr := s.saveSite(ctx, site); saveErr != nil {
 		return response, saveErr
 	}
+	if reloginRequired && stringPointerValue(previousErrorKey) != ErrorReloginRequired && s.markLoginFailureAlert(site.ID) {
+		s.notifyLoginRequired(site)
+	}
 	if refreshErr == nil {
+		s.clearLoginFailureAlert(site.ID)
 		s.saveSnapshot(ctx, site)
 		if s.AfterSync != nil {
 			go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics)
 		}
 	}
 	return response, nil
+}
+
+func (s *Service) refreshSiteSession(ctx context.Context, site *Site, session Session) (Session, Metrics, bool, error) {
+	refreshAttempted := sub2APIRefreshDue(session)
+	refreshedSession, refreshErr := s.platformService.RefreshSessionContext(ctx, session)
+	if refreshErr == nil {
+		metrics, metricsErr := s.platformService.FetchMetricsContext(ctx, refreshedSession)
+		if metricsErr == nil {
+			return refreshedSession, metrics, false, nil
+		}
+		if !isSessionAuthFailure(metricsErr) {
+			return refreshedSession, Metrics{}, false, metricsErr
+		}
+		refreshErr = metricsErr
+
+		// Access tokens may be revoked before their recorded expiry. In that case
+		// RefreshSessionContext intentionally skipped the refresh, so force one
+		// refresh-token exchange before falling back to the saved password.
+		if session.Platform == PlatformSub2API && !refreshAttempted && strings.TrimSpace(refreshedSession.RefreshToken) != "" {
+			refreshedSession, refreshErr = s.platformService.refreshSub2APISessionContext(ctx, refreshedSession)
+			if refreshErr == nil {
+				metrics, metricsErr = s.platformService.FetchMetricsContext(ctx, refreshedSession)
+				if metricsErr == nil {
+					return refreshedSession, metrics, false, nil
+				}
+				if !isSessionAuthFailure(metricsErr) {
+					return refreshedSession, Metrics{}, false, metricsErr
+				}
+				refreshErr = metricsErr
+			}
+		}
+	}
+
+	if session.Platform != PlatformSub2API {
+		return Session{}, Metrics{}, false, refreshErr
+	}
+	if site == nil || strings.TrimSpace(site.Account) == "" || strings.TrimSpace(site.PasswordCiphertext) == "" {
+		return Session{}, Metrics{}, true, refreshErr
+	}
+
+	password, err := decryptCredentialPassword(s.credentialGCM, site.UserID, site.AdminAccountID, site.PasswordCiphertext)
+	if err != nil {
+		log.Printf("[upstream] saved password unavailable for automatic relogin site_id=%s key=%s", site.ID, errorKey(err))
+		return Session{}, Metrics{}, true, err
+	}
+	loginResult, err := s.platformService.LoginContext(ctx, site.BaseURL, PlatformSub2API, site.Account, password)
+	if err != nil {
+		log.Printf("[upstream] automatic password relogin failed site_id=%s key=%s", site.ID, errorKey(err))
+		return Session{}, Metrics{}, true, err
+	}
+	log.Printf("[upstream] automatic password relogin succeeded site_id=%s", site.ID)
+	return loginResult.Session, loginResult.Metrics, false, nil
+}
+
+func sub2APIRefreshDue(session Session) bool {
+	if session.Platform != PlatformSub2API || strings.TrimSpace(session.RefreshToken) == "" {
+		return false
+	}
+	return session.ExpiresAt == nil || *session.ExpiresAt-time.Now().UnixMilli() <= refreshSkewMS
+}
+
+func isSessionAuthFailure(err error) bool {
+	var requestErr *RequestError
+	if !errors.As(err, &requestErr) {
+		return false
+	}
+	return requestErr.MessageKey == ErrorAuth || requestErr.StatusCode == 401 || requestErr.StatusCode == 403
+}
+
+func stringPointerValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func (s *Service) notifyLoginRequired(site *Site) {
+	if s.loginFailureNotifier == nil || site == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		s.loginFailureNotifier.NotifyUpstreamLoginRequired(ctx, site.UserID, site.AdminAccountID, site.Name, site.BaseURL)
+	}()
+}
+
+// markLoginFailureAlert deduplicates alerts from a timer sync and a manual sync
+// that happen at the same time. The persisted error key remains the source of
+// truth across restarts; this in-memory marker closes the concurrent window.
+func (s *Service) markLoginFailureAlert(siteID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loginFailureAlerts == nil {
+		s.loginFailureAlerts = make(map[string]struct{})
+	}
+	if _, exists := s.loginFailureAlerts[siteID]; exists {
+		return false
+	}
+	s.loginFailureAlerts[siteID] = struct{}{}
+	return true
+}
+
+func (s *Service) clearLoginFailureAlert(siteID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.loginFailureAlerts, siteID)
 }
 
 // preserveConfirmedSub2APIGroupRates prevents a transient /groups/rates
@@ -1184,6 +1309,7 @@ func (s *Service) Remove(ctx context.Context, userID string, id string) error {
 
 	s.mu.Lock()
 	s.clearTimerLocked(id)
+	delete(s.loginFailureAlerts, id)
 	s.mu.Unlock()
 
 	removedSite := *site
@@ -1220,6 +1346,7 @@ func (s *Service) CleanupDeletedWorkspaceSites(ctx context.Context, userID strin
 	for _, id := range ids {
 		s.deletedSites[id] = struct{}{}
 		s.clearTimerLocked(id)
+		delete(s.loginFailureAlerts, id)
 	}
 	s.mu.Unlock()
 

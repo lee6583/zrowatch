@@ -1497,6 +1497,7 @@ export default {
         invalidUrl: 'The site URL is invalid. Check it and try again.',
         network: 'Network or CORS request failed. Check the site URL and cross-origin settings.',
         auth: 'Login failed. Check the account or password.',
+        reloginRequired: 'The saved session expired and automatic login failed. Enter the password and sign in again.',
         credentialEncryptionUnavailable: 'Cannot securely save upstream credentials. Configure UPSTREAM_CREDENTIAL_ENCRYPTION_KEY first.',
         credentialDecryptFailed: 'Unable to decrypt the upstream password. Edit the original site and save the password again.',
         request: 'The upstream API request failed. Try again later.',

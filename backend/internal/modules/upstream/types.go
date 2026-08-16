@@ -28,6 +28,7 @@ const (
 	ErrorNotFound        = "admin.upstream.errors.notFound"
 	ErrorInvalidURL      = "admin.upstream.errors.invalidUrl"
 	ErrorAuth            = "admin.upstream.errors.auth"
+	ErrorReloginRequired = "admin.upstream.errors.reloginRequired"
 	ErrorNetwork         = "admin.upstream.errors.network"
 	ErrorRequest         = "admin.upstream.errors.request"
 	ErrorInvalidResponse = "admin.upstream.errors.invalidResponse"

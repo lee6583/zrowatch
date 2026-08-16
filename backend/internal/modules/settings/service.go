@@ -337,6 +337,31 @@ func (s *Service) SendToBotsForWorkspace(ctx context.Context, userID string, adm
 	}
 }
 
+// NotifyUpstreamLoginRequired sends a session-expiry alert through every
+// enabled DingTalk bot in the workspace. Login recovery has no dedicated bot
+// selector, so it intentionally does not reuse balance or rate-alert choices.
+func (s *Service) NotifyUpstreamLoginRequired(ctx context.Context, userID, adminAccountID, siteName, baseURL string) {
+	channels, err := s.repository.GetNotificationChannels(ctx, userID, adminAccountID)
+	if err != nil {
+		log.Printf("[settings] 加载登录失效通知渠道失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+		return
+	}
+	message := fmt.Sprintf("【上游登录失效】%s 的 Refresh Token 刷新失败，且保存的账号密码无法完成自动登录，请在 ZroWatch 上游管理中重新手动登录。\n站点：%s", strings.TrimSpace(siteName), strings.TrimSpace(baseURL))
+	matched := 0
+	for _, bot := range channels.Dingtalk {
+		if !bot.Enabled {
+			continue
+		}
+		matched++
+		if err := s.sendDingtalk(ctx, bot.Webhook, bot.Secret, message); err != nil {
+			log.Printf("[settings] 上游登录失效钉钉通知发送失败 bot=%s err=%v", bot.Name, err)
+		}
+	}
+	if matched == 0 {
+		log.Printf("[settings] 上游登录失效但当前工作区没有已启用钉钉机器人 user_id=%s admin_account_id=%s", userID, adminAccountID)
+	}
+}
+
 func (s *Service) sendDingtalk(ctx context.Context, webhook string, secret string, message string) error {
 	if webhook == "" {
 		return ErrMissingWebhook

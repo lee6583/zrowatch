@@ -2,8 +2,10 @@ package settings
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -101,5 +103,37 @@ func TestSendDingtalkRejectsJSONErrorWithHTTP200(t *testing.T) {
 	service := &Service{client: server.Client()}
 	if err := service.sendDingtalk(context.Background(), server.URL, "", "rate changed"); err == nil {
 		t.Fatal("expected DingTalk JSON error to be returned")
+	}
+}
+
+func TestNotifyUpstreamLoginRequiredUsesEnabledWorkspaceDingtalkBotsOnly(t *testing.T) {
+	requests := 0
+	var message string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		body, _ := io.ReadAll(r.Body)
+		message = string(body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"errcode":0,"errmsg":"ok"}`))
+	}))
+	defer server.Close()
+
+	repo := &fakeSettingsRepository{channels: map[string]NotificationChannelSettings{
+		workspaceKey("user-1", "workspace-1"): {
+			Dingtalk: []DingtalkChannelSettings{
+				{ID: "enabled", Name: "enabled", Enabled: true, Webhook: server.URL},
+				{ID: "disabled", Name: "disabled", Enabled: false, Webhook: server.URL},
+			},
+			Feishu: []WebhookChannelSettings{{ID: "feishu", Enabled: true, Webhook: server.URL}},
+		},
+	}}
+	service := &Service{client: server.Client(), repository: repo}
+
+	service.NotifyUpstreamLoginRequired(context.Background(), "user-1", "workspace-1", "Test Site", "https://upstream.example.com")
+	if requests != 1 {
+		t.Fatalf("expected only one enabled DingTalk request, got %d", requests)
+	}
+	if !strings.Contains(message, "Test Site") || !strings.Contains(message, "https://upstream.example.com") || !strings.Contains(message, "重新手动登录") {
+		t.Fatalf("unexpected notification payload: %s", message)
 	}
 }

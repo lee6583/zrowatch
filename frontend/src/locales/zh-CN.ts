@@ -1497,6 +1497,7 @@ export default {
         invalidUrl: '站点 URL 无效，请检查后重试。',
         network: '网络或 CORS 请求失败，请检查站点地址与跨域配置。',
         auth: '登录失败，请检查账号或密码。',
+        reloginRequired: '登录会话已失效，自动重新登录也失败，请重新填写密码手动登录。',
         credentialEncryptionUnavailable: '无法安全保存上游账号密码，请先配置 UPSTREAM_CREDENTIAL_ENCRYPTION_KEY。',
         credentialDecryptFailed: '上游账号密码解密失败，请重新编辑原站点并保存密码。',
         request: '上游接口请求失败，请稍后重试。',
