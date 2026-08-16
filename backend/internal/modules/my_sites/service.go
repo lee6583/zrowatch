@@ -129,10 +129,38 @@ func (s *Service) CleanupSiteConnections(ctx context.Context, userID, adminAccou
 			ConnectionID: conn.ID,
 			Mode:         mode,
 		}); err != nil {
-			return err
+			if mode != "full" {
+				return err
+			}
+			// A site is local lifecycle state and must remain deletable even when
+			// either remote endpoint is unavailable. Keep database consistency by
+			// falling back to unlinking the local binding and pricing mapping. The
+			// remote account/key may need manual cleanup after connectivity returns.
+			log.Printf("[my-sites] remote cleanup failed during site deletion site_id=%s connection_id=%s key=%s; falling back to local unlink", siteID, conn.ID, upstreamErrorKey(err))
+			if unlinkErr := s.realDisconnectConnectionForAdmin(ctx, userID, adminAccountID, RealDisconnectRequest{
+				ConnectionID: conn.ID,
+				Mode:         "unlink",
+			}); unlinkErr != nil {
+				return unlinkErr
+			}
 		}
 	}
 	return nil
+}
+
+func upstreamErrorKey(err error) string {
+	if err == nil {
+		return ""
+	}
+	var localRequestErr requestError
+	if errors.As(err, &localRequestErr) {
+		return localRequestErr.Error()
+	}
+	var upstreamRequestErr *upstream.RequestError
+	if errors.As(err, &upstreamRequestErr) {
+		return upstreamRequestErr.MessageKey
+	}
+	return "internal_error"
 }
 
 // BotNotifier 机器人通知发送接口，由 settings.Service 实现。
