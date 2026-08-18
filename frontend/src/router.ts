@@ -74,6 +74,12 @@ const routes = [
         component: () => import('./modules/admin/views/ConnectionHealthView.vue')
       },
       {
+        path: 'user-management',
+        name: 'AdminUserManagement',
+        meta: { requiresWorkspace: true },
+        component: () => import('./modules/admin/views/UserManagementView.vue')
+      },
+      {
         path: 'group-rate-campaigns',
         name: 'AdminGroupRateCampaigns',
         meta: { requiresWorkspace: true },

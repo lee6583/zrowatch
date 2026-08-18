@@ -362,6 +362,27 @@ func (s *Service) NotifyUpstreamLoginRequired(ctx context.Context, userID, admin
 	}
 }
 
+// NotifyUserBalanceEvent sends user-balance warnings and automatic recharge
+// results through every enabled DingTalk bot in the event workspace.
+func (s *Service) NotifyUserBalanceEvent(ctx context.Context, userID, adminAccountID, message string) {
+	if strings.TrimSpace(message) == "" {
+		return
+	}
+	channels, err := s.repository.GetNotificationChannels(ctx, userID, adminAccountID)
+	if err != nil {
+		log.Printf("[settings] 加载用户余额通知渠道失败 user_id=%s admin_account_id=%s err=%v", userID, adminAccountID, err)
+		return
+	}
+	for _, bot := range channels.Dingtalk {
+		if !bot.Enabled {
+			continue
+		}
+		if err := s.sendDingtalk(ctx, bot.Webhook, bot.Secret, message); err != nil {
+			log.Printf("[settings] 用户余额钉钉通知发送失败 bot=%s err=%v", bot.Name, err)
+		}
+	}
+}
+
 func (s *Service) sendDingtalk(ctx context.Context, webhook string, secret string, message string) error {
 	if webhook == "" {
 		return ErrMissingWebhook

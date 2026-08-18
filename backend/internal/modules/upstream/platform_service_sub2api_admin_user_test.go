@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,6 +9,37 @@ import (
 	"testing"
 	"time"
 )
+
+func TestUpdateSub2APIAdminUserBalanceUsesAddAndIdempotencyKey(t *testing.T) {
+	var gotPath, gotAuth, gotKey string
+	var gotBody map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotAuth = r.Header.Get("Authorization")
+		gotKey = r.Header.Get("Idempotency-Key")
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Fatalf("decode request body: %v", err)
+		}
+		writeJSON(w, map[string]any{"data": map[string]any{"id": "42", "balance": 25.0}})
+	}))
+	defer server.Close()
+
+	service := NewPlatformService(NewHTTPClient(server.Client()))
+	session := Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "admin-token", TokenType: "Bearer"}
+	user, err := service.UpdateSub2APIAdminUserBalance(session, "42", 20, "automatic recharge", "event-123")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotPath != "/api/v1/admin/users/42/balance" || gotAuth != "Bearer admin-token" || gotKey != "event-123" {
+		t.Fatalf("unexpected request path=%q auth=%q key=%q", gotPath, gotAuth, gotKey)
+	}
+	if gotBody["operation"] != "add" || gotBody["balance"] != float64(20) || gotBody["notes"] != "automatic recharge" {
+		t.Fatalf("unexpected request body: %#v", gotBody)
+	}
+	if user.Balance == nil || *user.Balance != 25 {
+		t.Fatalf("unexpected response user: %+v", user)
+	}
+}
 
 // TestFetchSub2APIAdminUser_RequestPathAndAuthHeader 验证请求路径拼接和 Authorization header，
 // 并覆盖 snake_case 字段解析（id/email/username/role/status/balance/frozen_balance/concurrency/

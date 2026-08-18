@@ -31,6 +31,7 @@ const (
 )
 
 var workspaceDeleteStatements = []workspaceDeleteStatement{
+	{Name: "user_balance_rules", SQL: `DELETE FROM user_balance_rules WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "lottery_reward_jobs", SQL: `DELETE FROM lottery_reward_jobs WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "lottery_winners", SQL: `DELETE FROM lottery_winners WHERE user_id = $1 AND admin_account_id = $2`},
 	{Name: "lottery_draws", SQL: `DELETE FROM lottery_draws WHERE user_id = $1 AND admin_account_id = $2`},
@@ -81,6 +82,7 @@ var workspaceDeleteStatements = []workspaceDeleteStatement{
 }
 
 var legacyWorkspaceTables = []workspaceTableDescriptor{
+	{Name: "user_balance_rules", WorkspaceColumn: "admin_account_id"},
 	{Name: "lottery_embed_configs", WorkspaceColumn: "admin_account_id"},
 	{Name: "lottery_campaigns", WorkspaceColumn: "admin_account_id"},
 	{Name: "lottery_prizes", WorkspaceColumn: "admin_account_id"},

@@ -3178,6 +3178,33 @@ func (s *PlatformService) FetchSub2APIAdminUser(session Session, userID string) 
 	return parseSub2APIAdminUser(dataRecord(response.Payload)), nil
 }
 
+// UpdateSub2APIAdminUserBalance adds balance through Sub2API's idempotent admin
+// endpoint. Callers must persist and reuse idempotencyKey while retrying an
+// ambiguous request so the same recharge cannot be applied twice.
+func (s *PlatformService) UpdateSub2APIAdminUserBalance(session Session, userID string, amount float64, notes string, idempotencyKey string) (Sub2APIAdminUser, error) {
+	if session.Platform != PlatformSub2API || !session.IsAuthenticated() || amount <= 0 {
+		return Sub2APIAdminUser{}, newRequestError(ErrorAuth, PlatformSub2API)
+	}
+	trimmedID := strings.TrimSpace(userID)
+	if trimmedID == "" || strings.TrimSpace(idempotencyKey) == "" {
+		return Sub2APIAdminUser{}, newRequestError(ErrorInvalidResponse, PlatformSub2API)
+	}
+	options := adminAuthOptions(session)
+	options.Method = http.MethodPost
+	options.IdempotencyKey = strings.TrimSpace(idempotencyKey)
+	options.Body = map[string]any{
+		"balance":   amount,
+		"operation": "add",
+		"notes":     strings.TrimSpace(notes),
+	}
+	requestURL := session.BaseURL + "/api/v1/admin/users/" + url.PathEscape(trimmedID) + "/balance"
+	response, err := s.httpClient.requestJSON(requestURL, options)
+	if err != nil {
+		return Sub2APIAdminUser{}, err
+	}
+	return parseSub2APIAdminUser(dataRecord(response.Payload)), nil
+}
+
 // FetchSub2APIAdminUserBalanceHistory 通过 GET /api/v1/admin/users/:id/balance-history 查询
 // 指定 Sub2API 用户的余额/充值历史。page/pageSize 非法时分别回退到 1/20；codeType 为空时不带
 // type 查询参数。

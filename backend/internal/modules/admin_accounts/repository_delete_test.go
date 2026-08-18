@@ -7,6 +7,7 @@ import (
 
 func TestWorkspaceDeleteStatementsCoverAllWorkspaceTables(t *testing.T) {
 	want := []string{
+		"user_balance_rules",
 		"lottery_reward_jobs",
 		"lottery_winners",
 		"lottery_draws",

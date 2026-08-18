@@ -17,13 +17,14 @@ type HTTPClient struct {
 }
 
 type requestOptions struct {
-	Method      string
-	Body        any
-	Cookie      string
-	UserID      string
-	AccessToken string
-	TokenType   string
-	AdminAPIKey string
+	Method         string
+	Body           any
+	Cookie         string
+	UserID         string
+	AccessToken    string
+	TokenType      string
+	AdminAPIKey    string
+	IdempotencyKey string
 }
 
 type jsonResponse struct {
@@ -70,6 +71,9 @@ func (c *HTTPClient) requestJSONContext(ctx context.Context, reqURL string, opti
 	}
 	if options.AdminAPIKey != "" {
 		req.Header.Set("x-api-key", options.AdminAPIKey)
+	}
+	if options.IdempotencyKey != "" {
+		req.Header.Set("Idempotency-Key", options.IdempotencyKey)
 	}
 
 	req.Header.Set("User-Agent", BrowserUserAgent)

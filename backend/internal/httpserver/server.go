@@ -30,6 +30,7 @@ import (
 	"transithub/backend/internal/modules/system"
 	"transithub/backend/internal/modules/tickets"
 	"transithub/backend/internal/modules/upstream"
+	"transithub/backend/internal/modules/user_management"
 	"transithub/backend/internal/modules/users"
 	"transithub/backend/internal/shared/authctx"
 	"transithub/backend/internal/shared/httpjson"
@@ -166,6 +167,16 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 		panic(err)
 	}
 	upstreamService.SetLoginFailureNotifier(settingsService)
+	userManagementService := user_management.NewService(
+		user_management.NewRepository(db),
+		mySitesService,
+		platformService,
+		settingsService,
+	)
+	if err := userManagementService.EnsureSchema(context.Background()); err != nil {
+		panic(err)
+	}
+	user_management.RegisterRoutes(server.mux, userManagementService, adminAccountsService)
 	// SMTP_ENCRYPTION_KEY 是可选项：空值不影响启动；显式配置了非法值（非 base64 或非 32 字节）
 	// 必须尽早启动失败，避免运行时才发现加密能力不可用。抽成 configureSMTPEncryptionKey
 	// 这个窄 seam，便于在不启动真实 DB/Redis 依赖的情况下单元测试这条组装路径。
@@ -266,6 +277,7 @@ func New(cfg config.Config, db *pgxpool.Pool, redisClient *redis.Client) *Server
 	server.lotteryCancel = lotteryCancel
 	server.lotteryWorker = lotteryWorker
 	connHealthService.StartScheduler(context.Background())
+	userManagementService.StartScheduler(context.Background())
 
 	// 策略设置变更时通知上游服务更新定时同步配置。
 	applyRefreshConfig := func(s settings.StrategySettings) {
@@ -479,7 +491,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) protectedPath(path string) bool {
-	return strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email")
+	return strings.HasPrefix(path, "/api/admin-accounts") || strings.HasPrefix(path, "/api/upstream-sites") || strings.HasPrefix(path, "/api/group-rates") || strings.HasPrefix(path, "/api/group-rate-campaigns") || strings.HasPrefix(path, "/api/my-sites") || strings.HasPrefix(path, "/api/settings") || strings.HasPrefix(path, "/api/dashboard") || strings.HasPrefix(path, "/api/system") || strings.HasPrefix(path, "/api/connection-health") || strings.HasPrefix(path, "/api/tickets") || strings.HasPrefix(path, "/api/leaderboard") || strings.HasPrefix(path, "/api/lottery") || strings.HasPrefix(path, "/api/mass-email") || strings.HasPrefix(path, "/api/user-management")
 }
 
 func (s *Server) setSecurityHeaders(w http.ResponseWriter, r *http.Request) {

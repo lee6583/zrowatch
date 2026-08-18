@@ -22,6 +22,15 @@ func TestProtectedPathDoesNotOvermatchMassEmailLookalikes(t *testing.T) {
 	}
 }
 
+func TestProtectedPathIncludesUserManagementPrefix(t *testing.T) {
+	server := &Server{}
+	for _, path := range []string{"/api/user-management/users", "/api/user-management/users/42/rule"} {
+		if !server.protectedPath(path) {
+			t.Fatalf("expected %s to be protected", path)
+		}
+	}
+}
+
 func TestProtectedPathIncludesLeaderboardAdminPrefix(t *testing.T) {
 	server := &Server{}
 	for _, path := range []string{"/api/leaderboard/data", "/api/leaderboard/embed-config", "/api/leaderboard/embed-config/rotate-token"} {

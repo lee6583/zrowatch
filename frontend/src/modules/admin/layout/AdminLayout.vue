@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, onBeforeUnmount, watch, type Component } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { LayoutDashboard, Network, Settings, LogOut, Globe, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, PanelLeftClose, PanelLeftOpen } from 'lucide-vue-next'
+import { LayoutDashboard, Network, Settings, LogOut, Globe, Moon, Sun, Percent, Megaphone, ChevronDown, ArrowRightLeft, FolderTree, Link2, Activity, MessageSquare, Github, Mail, Menu, X, Trophy, Gift, Boxes, PanelLeftClose, PanelLeftOpen, UsersRound } from 'lucide-vue-next'
 import { useDark, useToggle } from '@vueuse/core'
 import { useI18n } from 'vue-i18n'
 import { useAdminAccounts } from '../composables/useAdminAccounts'
@@ -136,7 +136,7 @@ interface MenuChild {
 }
 
 // 菜单项分两种形态：叶子（单一路由入口）和分组（固定顺序的二级菜单集合）。
-// “分组管理”下的三个二级菜单顺序固定：分组倍率 -> 分组关联 -> 分组健康，不随业务改动调整。
+// “分组管理”下的二级菜单保持固定顺序，便于频繁切换。
 type MenuEntry =
   | { type: 'leaf'; name: string; path: string; icon: Component }
   | { type: 'group'; id: string; name: string; icon: Component; children: MenuChild[] }
@@ -153,6 +153,7 @@ const menuItems = computed<MenuEntry[]>(() => [
       { name: t('admin.menu.groupRates'), path: '/admin/group-rates', icon: Percent },
       { name: t('admin.menu.groupAssociations'), path: '/admin/group-associations', icon: Link2 },
       { name: t('admin.menu.connectionHealth'), path: '/admin/connection-health', icon: Activity },
+      { name: t('admin.menu.userManagement'), path: '/admin/user-management', icon: UsersRound },
     ],
   },
   { type: 'leaf', name: t('admin.menu.massEmail'), path: '/admin/mass-email', icon: Mail },
