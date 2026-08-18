@@ -1058,7 +1058,14 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 		}
 		key := errorKey(refreshErr)
 		if reloginRequired {
-			key = ErrorReloginRequired
+			// A single authentication failure can still be a transient proxy or
+			// deployment event. Require two consecutive confirmed auth failures
+			// before telling the operator that manual login is required.
+			if stringPointerValue(previousErrorKey) == ErrorAuth || stringPointerValue(previousErrorKey) == ErrorReloginRequired {
+				key = ErrorReloginRequired
+			} else {
+				key = ErrorAuth
+			}
 		}
 		site.ErrorKey = &key
 	} else {
@@ -1084,11 +1091,13 @@ func (s *Service) sync(ctx context.Context, id string) (Response, error) {
 	if saveErr := s.saveSite(ctx, site); saveErr != nil {
 		return response, saveErr
 	}
-	if reloginRequired && stringPointerValue(previousErrorKey) != ErrorReloginRequired && s.markLoginFailureAlert(site.ID) {
+	if reloginRequired && stringPointerValue(site.ErrorKey) == ErrorReloginRequired && stringPointerValue(previousErrorKey) != ErrorReloginRequired && s.markLoginFailureAlert(site.ID) {
 		s.notifyLoginRequired(site)
 	}
-	if refreshErr == nil {
+	if refreshErr == nil || !reloginRequired {
 		s.clearLoginFailureAlert(site.ID)
+	}
+	if refreshErr == nil {
 		s.saveSnapshot(ctx, site)
 		if s.AfterSync != nil {
 			go s.AfterSync(context.Background(), site.UserID, site.AdminAccountID, site.ID, site.Name, oldMetrics, metrics)
@@ -1131,19 +1140,20 @@ func (s *Service) refreshSiteSession(ctx context.Context, site *Site, session Se
 	if session.Platform != PlatformSub2API {
 		return Session{}, Metrics{}, false, refreshErr
 	}
+	refreshAuthFailure := isSessionAuthFailure(refreshErr)
 	if site == nil || strings.TrimSpace(site.Account) == "" || strings.TrimSpace(site.PasswordCiphertext) == "" {
-		return Session{}, Metrics{}, true, refreshErr
+		return Session{}, Metrics{}, refreshAuthFailure, refreshErr
 	}
 
 	password, err := decryptCredentialPassword(s.credentialGCM, site.UserID, site.AdminAccountID, site.PasswordCiphertext)
 	if err != nil {
 		log.Printf("[upstream] saved password unavailable for automatic relogin site_id=%s key=%s", site.ID, errorKey(err))
-		return Session{}, Metrics{}, true, err
+		return Session{}, Metrics{}, refreshAuthFailure, err
 	}
 	loginResult, err := s.platformService.LoginContext(ctx, site.BaseURL, PlatformSub2API, site.Account, password)
 	if err != nil {
 		log.Printf("[upstream] automatic password relogin failed site_id=%s key=%s", site.ID, errorKey(err))
-		return Session{}, Metrics{}, true, err
+		return Session{}, Metrics{}, refreshAuthFailure && isSessionAuthFailure(err), err
 	}
 	log.Printf("[upstream] automatic password relogin succeeded site_id=%s", site.ID)
 	return loginResult.Session, loginResult.Metrics, false, nil

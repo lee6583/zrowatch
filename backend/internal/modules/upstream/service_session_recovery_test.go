@@ -184,24 +184,130 @@ func TestSyncReloginFailureNotifiesOnceUntilRecovery(t *testing.T) {
 	}
 	select {
 	case <-notifier.called:
-	case <-time.After(time.Second):
-		t.Fatal("expected relogin failure notification")
+		t.Fatal("a single auth failure must not request manual login")
+	case <-time.After(100 * time.Millisecond):
 	}
 
 	updated, _ := cache.Get(context.Background(), site.ID)
-	if updated == nil || updated.ErrorKey == nil || *updated.ErrorKey != ErrorReloginRequired {
-		t.Fatalf("expected persisted relogin-required error, got %+v", updated)
+	if updated == nil || updated.ErrorKey == nil || *updated.ErrorKey != ErrorAuth {
+		t.Fatalf("expected first auth failure to remain retryable, got %+v", updated)
 	}
 	if _, err := service.sync(context.Background(), site.ID); err != nil {
 		t.Fatalf("second sync returned error: %v", err)
 	}
 	select {
 	case <-notifier.called:
-		t.Fatal("repeated failure must not send a duplicate notification")
+	case <-time.After(time.Second):
+		t.Fatal("expected notification after two confirmed auth failures")
+	}
+	updated, _ = cache.Get(context.Background(), site.ID)
+	if updated == nil || updated.ErrorKey == nil || *updated.ErrorKey != ErrorReloginRequired {
+		t.Fatalf("expected persisted relogin-required error, got %+v", updated)
+	}
+	if _, err := service.sync(context.Background(), site.ID); err != nil {
+		t.Fatalf("third sync returned error: %v", err)
+	}
+	select {
+	case <-notifier.called:
+		t.Fatal("continued failure must not send a duplicate notification")
 	case <-time.After(100 * time.Millisecond):
 	}
-	if loginCalls != 2 {
+	if loginCalls != 3 {
 		t.Fatalf("expected each sync to retry password login, got %d attempts", loginCalls)
+	}
+}
+
+func TestSyncTransientRefreshAndLoginFailuresDoNotRequestManualLogin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh", "/api/v1/auth/login":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			sessionRecoveryMetrics(w, r)
+		}
+	}))
+	defer server.Close()
+
+	gcm := testCredentialGCM(t)
+	ciphertext, err := encryptCredentialPassword(gcm, "user-1", "workspace-1", "saved-password")
+	if err != nil {
+		t.Fatalf("encrypt password: %v", err)
+	}
+	expiresAt := time.Now().Add(-time.Minute).UnixMilli()
+	site := &Site{
+		ID: "site-1", UserID: "user-1", AdminAccountID: "workspace-1", Name: "upstream",
+		BaseURL: server.URL, Platform: PlatformSub2API, Account: "admin@example.com",
+		Status: StatusConnected, Metrics: defaultMetrics(), PasswordCiphertext: ciphertext,
+		Session: &Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "old-access", RefreshToken: "old-refresh", ExpiresAt: &expiresAt},
+	}
+	cache := newFakeSiteCache()
+	cache.add(site)
+	service := NewService(NewPlatformService(NewHTTPClient(server.Client())), &importTestRepository{}, nil, cache)
+	service.credentialGCM = gcm
+	notifier := &sessionRecoveryNotifier{called: make(chan struct{}, 2)}
+	service.SetLoginFailureNotifier(notifier)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := service.sync(context.Background(), site.ID); err != nil {
+			t.Fatalf("sync %d returned error: %v", attempt+1, err)
+		}
+	}
+	select {
+	case <-notifier.called:
+		t.Fatal("transient upstream failures must not request manual login")
+	case <-time.After(100 * time.Millisecond):
+	}
+	updated, _ := cache.Get(context.Background(), site.ID)
+	if updated == nil || updated.ErrorKey == nil || *updated.ErrorKey != ErrorRequest {
+		t.Fatalf("expected ordinary request error, got %+v", updated)
+	}
+}
+
+func TestSyncTransientPasswordLoginFailureDoesNotRequestManualLogin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/auth/refresh":
+			w.WriteHeader(http.StatusUnauthorized)
+		case "/api/v1/auth/login":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			sessionRecoveryMetrics(w, r)
+		}
+	}))
+	defer server.Close()
+
+	gcm := testCredentialGCM(t)
+	ciphertext, err := encryptCredentialPassword(gcm, "user-1", "workspace-1", "saved-password")
+	if err != nil {
+		t.Fatalf("encrypt password: %v", err)
+	}
+	expiresAt := time.Now().Add(-time.Minute).UnixMilli()
+	site := &Site{
+		ID: "site-1", UserID: "user-1", AdminAccountID: "workspace-1", Name: "upstream",
+		BaseURL: server.URL, Platform: PlatformSub2API, Account: "admin@example.com",
+		Status: StatusConnected, Metrics: defaultMetrics(), PasswordCiphertext: ciphertext,
+		Session: &Session{Platform: PlatformSub2API, BaseURL: server.URL, AccessToken: "old-access", RefreshToken: "old-refresh", ExpiresAt: &expiresAt},
+	}
+	cache := newFakeSiteCache()
+	cache.add(site)
+	service := NewService(NewPlatformService(NewHTTPClient(server.Client())), &importTestRepository{}, nil, cache)
+	service.credentialGCM = gcm
+	notifier := &sessionRecoveryNotifier{called: make(chan struct{}, 2)}
+	service.SetLoginFailureNotifier(notifier)
+
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := service.sync(context.Background(), site.ID); err != nil {
+			t.Fatalf("sync %d returned error: %v", attempt+1, err)
+		}
+	}
+	select {
+	case <-notifier.called:
+		t.Fatal("a transient password-login failure must not request manual login")
+	case <-time.After(100 * time.Millisecond):
+	}
+	updated, _ := cache.Get(context.Background(), site.ID)
+	if updated == nil || updated.ErrorKey == nil || *updated.ErrorKey != ErrorRequest {
+		t.Fatalf("expected ordinary request error, got %+v", updated)
 	}
 }
 
