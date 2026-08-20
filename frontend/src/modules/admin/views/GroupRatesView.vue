@@ -99,6 +99,7 @@ const isTogglingProfitPriority = ref(false)
 const healthSettingsErrorKey = ref('')
 const healthSettingsDraft = ref<GroupRateMonitorSettings | null>(null)
 const healthSettingsGroupType = ref('')
+const healthSettingsGroupSearch = ref('')
 const flashingHealthGroups = ref<Set<string>>(new Set())
 const isAnyDialogOpen = computed(() => Boolean(isHistoryOpen.value || editingRate.value || connectingRate.value || connectionEditingRate.value || disconnectingRate.value || isHealthSettingsOpen.value))
 let previouslyFocusedElement: HTMLElement | null = null
@@ -580,6 +581,7 @@ const openHealthSettings = async () => {
     const settings = await loadHealthSettingsSnapshot(true)
     healthSettingsDraft.value = cloneHealthSettings(settings)
     healthSettingsGroupType.value = healthSettingsGroupTypes.value[0] ?? ''
+    healthSettingsGroupSearch.value = ''
   } catch (error) {
     healthSettingsErrorKey.value = error instanceof Error ? error.message : 'admin.groupRates.health.errors.settingsLoadFailed'
   } finally {
@@ -591,6 +593,7 @@ const closeHealthSettings = () => {
   isHealthSettingsOpen.value = false
   healthSettingsDraft.value = null
   healthSettingsGroupType.value = ''
+  healthSettingsGroupSearch.value = ''
   healthSettingsErrorKey.value = ''
 }
 
@@ -723,7 +726,17 @@ const healthSettingsGroupTypes = computed(() => {
 const filteredHealthSettingsGroups = computed(() => {
   const groups = healthSettingsDraft.value?.groups ?? []
   if (!healthSettingsGroupType.value) return []
-  return groups.filter(group => group.groupType === healthSettingsGroupType.value)
+  const query = healthSettingsGroupSearch.value.trim().toLocaleLowerCase()
+  return groups.filter(group => {
+    if (group.groupType !== healthSettingsGroupType.value) return false
+    if (!query) return true
+    return [
+      group.upstreamSiteName,
+      group.upstreamSiteId,
+      group.upstreamGroupName,
+      group.upstreamGroupId,
+    ].some(value => value.trim().toLocaleLowerCase().includes(query))
+  })
 })
 
 const selectedHealthTypeDefaults = computed(() => (
@@ -2129,7 +2142,19 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
             </section>
 
             <section v-if="selectedHealthTypeDefaults" class="mt-8 border-t border-border/50 pt-6">
-              <h3 class="text-sm font-semibold text-foreground">{{ t('admin.groupRates.health.settings.groupOverrides') }}</h3>
+              <div class="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+                <h3 class="text-sm font-semibold text-foreground">{{ t('admin.groupRates.health.settings.groupOverrides') }}</h3>
+                <label class="relative block w-full sm:w-80">
+                  <span class="sr-only">{{ t('admin.groupRates.health.settings.groupSearch') }}</span>
+                  <Search class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    v-model="healthSettingsGroupSearch"
+                    class="pl-9"
+                    :placeholder="t('admin.groupRates.health.settings.groupSearchPlaceholder')"
+                    autocomplete="off"
+                  />
+                </label>
+              </div>
               <div class="mt-4 overflow-x-auto rounded-lg border border-border/60">
                 <table class="w-full min-w-[920px] text-sm">
                   <thead class="border-b border-border/60 bg-surface-elevated/70">
@@ -2195,7 +2220,7 @@ const historyRowKey = (row: GroupRateHistoryRow, index: number): string => (
                       </td>
                     </tr>
                     <tr v-if="filteredHealthSettingsGroups.length === 0">
-                      <td colspan="5" class="px-4 py-8 text-center text-muted-foreground">{{ t('admin.groupRates.health.settings.noGroups') }}</td>
+                      <td colspan="5" class="px-4 py-8 text-center text-muted-foreground">{{ healthSettingsGroupSearch.trim() ? t('admin.groupRates.health.settings.noMatchingGroups') : t('admin.groupRates.health.settings.noGroups') }}</td>
                     </tr>
                   </tbody>
                 </table>

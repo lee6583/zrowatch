@@ -1652,6 +1652,8 @@ export default {
           modelPlaceholder: 'For example, gpt-4o-mini',
           groupOverrides: 'Connected Upstream Groups',
           groupTypeFilter: 'Group Type',
+          groupSearch: 'Search connected upstream groups',
+          groupSearchPlaceholder: 'Search upstream site or group',
           typeDefaults: '{type} Type Defaults',
           group: 'Upstream Group',
           autoProbe: 'Auto Probe',
@@ -1661,6 +1663,7 @@ export default {
           inheritGlobal: 'Inherit the global default model',
           groupAutoProbeLabel: 'Toggle automatic probing for {group}',
           noGroups: 'No connected upstream groups',
+          noMatchingGroups: 'No matching upstream site or group',
           save: 'Save Settings',
           saved: 'Settings saved. Restored {restored}, pending {pending}, manual conflicts {conflict}.'
         },

@@ -1652,6 +1652,8 @@ export default {
           modelPlaceholder: '例如 gpt-4o-mini',
           groupOverrides: '已对接上游分组',
           groupTypeFilter: '分组类型',
+          groupSearch: '搜索已对接上游分组',
+          groupSearchPlaceholder: '搜索上游站点或分组',
           typeDefaults: '{type} 类型统一设置',
           group: '上游分组',
           autoProbe: '自动探活',
@@ -1661,6 +1663,7 @@ export default {
           inheritGlobal: '继承全局默认模型',
           groupAutoProbeLabel: '切换 {group} 自动探活',
           noGroups: '暂无已对接的上游分组',
+          noMatchingGroups: '没有匹配的上游站点或分组',
           save: '保存设置',
           saved: '设置已保存。已恢复 {restored} 个账户，{pending} 个待重试，{conflict} 个保留人工状态。'
         },
